@@ -1,0 +1,40 @@
+{
+  "name": "telaqua-api",
+  "version": "2.0.0",
+  "description": "Production-ready REST API for Tel-Aqua — Node.js + Express",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js",
+    "lint": "echo \"No linter configured yet\"",
+    "migrate:customer-auth": "node scripts/migrate-customer-auth.js",
+    "migrate:inventory": "node scripts/migrate-inventory.js",
+    "migrate:order-views": "node scripts/migrate-order-views.js",
+    "test": "node --test --test-isolation=none"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.2",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "morgan": "^1.11.0",
+    "mysql2": "^3.14.3",
+    "nodemailer": "^6.10.1",
+    "pdfkit": "^0.17.2",
+    "razorpay": "^2.9.8"
+  },
+  "keywords": [
+    "telaqua",
+    "api",
+    "express",
+    "nodejs"
+  ],
+  "license": "UNLICENSED"
+}
