@@ -100,7 +100,18 @@ export function isPromoWithinUsageLimit(row) {
   return used < limit;
 }
 
+/** Retired public offer codes — never suggest these on landing. */
+const RETIRED_OFFER_CODES = ["WELCOME25", "SAVE500"];
+
+/** Preferred Website / Direct public coupon (matches promo_codes.code). */
+const PREFERRED_WEBSITE_DIRECT_CODE = "TELAQUA25";
+
+/**
+ * Suggested offer for marketing attribution (platform + language).
+ * Prefers TELAQUA25 for Website + Direct; skips retired WELCOME25 / SAVE500.
+ */
 export async function findOfferByPlatformLanguage(platform, language) {
+  const retiredPlaceholders = RETIRED_OFFER_CODES.map(() => "?").join(", ");
   const { rows } = await query(
     `SELECT ${PROMO_COLUMNS}
      FROM promo_codes
@@ -110,9 +121,12 @@ export async function findOfferByPlatformLanguage(platform, language) {
        AND (usage_limit IS NULL OR used_count < usage_limit)
        AND (valid_from IS NULL OR valid_from <= CURRENT_TIMESTAMP)
        AND (valid_until IS NULL OR valid_until >= CURRENT_TIMESTAMP)
-     ORDER BY id ASC
+       AND UPPER(TRIM(code)) NOT IN (${retiredPlaceholders})
+     ORDER BY
+       CASE WHEN UPPER(TRIM(code)) = ? THEN 0 ELSE 1 END,
+       id ASC
      LIMIT 1`,
-    [platform, language]
+    [platform, language, ...RETIRED_OFFER_CODES, PREFERRED_WEBSITE_DIRECT_CODE]
   );
 
   return rows[0] || null;

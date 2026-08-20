@@ -1,17 +1,74 @@
 /**
  * controllers/deliveryController.js
  *
- * Delhivery shipment creation only (CMU create.json).
- * Pickup / Ready for Pickup / labels / tracking happen in Delhivery One.
+ * Delhivery delivery / logistics endpoints (not payment):
+ * - Pincode serviceability, TAT, waybill, rate, warehouse
+ * - Shipment create / update
+ * - Label, pickup, tracking, NDR
  * See docs/DELHIVERY_FLOW.md
  */
 
-import { createShipment } from "../services/delhiveryService.js";
+import {
+  checkPincodeServiceability,
+  getExpectedTat,
+  getWaybills,
+  getShippingRate,
+  createClientWarehouse,
+  createShipment,
+  updateShipment,
+  trackShipment,
+  generateShippingLabel,
+  requestPickup,
+  updateNdr,
+} from "../services/delhiveryService.js";
 import { isMissingColumnError } from "../lib/dbErrors.js";
 import { query } from "../config/db.js";
 
+/** Sensible upper bound for bulk waybill requests. */
+const MAX_WAYBILL_COUNT = 100;
+
 /** Max chargeable weight in grams (50 kg). */
 const MAX_CGM = 50000;
+
+const ALLOWED_MD = ["E", "S"];
+/** Delhivery Invoice Charge API: Delivered, RTO, DTO only. */
+const ALLOWED_SS = ["Delivered", "RTO", "DTO"];
+
+/** Exact Client Warehouse Create fields allowed by Delhivery. */
+const WAREHOUSE_FIELDS = [
+  "name",
+  "registered_name",
+  "address",
+  "city",
+  "pin",
+  "phone",
+  "email",
+  "country",
+  "return_address",
+  "return_pin",
+  "return_city",
+  "return_state",
+  "return_country",
+];
+
+/** Delhivery Edit Order API — keys that can be updated (besides required waybill). */
+const SHIPMENT_UPDATE_OPTIONAL_FIELDS = [
+  "name",
+  "add",
+  "phone",
+  "cod",
+  "gm",
+  "shipment_length",
+  "shipment_width",
+  "shipment_height",
+  "product_details",
+  "pt",
+];
+
+const ALLOWED_PAYMENT_MODES_PT = ["COD", "Pre-paid", "Prepaid", "Pickup"];
+
+/** Delhivery NDR Update API — allowed act values. */
+const NDR_ACTIONS = ["RE-ATTEMPT", "DEFER_DLV", "EDIT_DETAILS"];
 
 /** Delhivery rejects these characters in CMU payloads unless JSON-escaped carefully. */
 const DELHIVERY_FORBIDDEN_CHARS = /[&#%;\\]/g;
@@ -828,5 +885,784 @@ export async function createShipmentForOrder(req, res) {
     });
   } catch (error) {
     return handleDelhiveryError(res, error, "Delivery shipment create");
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Additional logistics ops (serviceability → NDR). Payment untouched. */
+/* ------------------------------------------------------------------ */
+
+function requireStringField(body, field) {
+  if (body[field] === undefined || body[field] === null) {
+    return { ok: false, message: `${field} is required` };
+  }
+  const value = String(body[field]).trim();
+  if (!value) {
+    return { ok: false, message: `${field} is required` };
+  }
+  return { ok: true, value };
+}
+
+async function findOrderByIdOrWaybill({ orderId, waybill }) {
+  if (orderId != null && String(orderId).trim() !== "") {
+    const id = Number(orderId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const { rows } = await query(`SELECT * FROM orders WHERE id = ? LIMIT 1`, [
+      id,
+    ]);
+    return rows[0] || null;
+  }
+  if (waybill) {
+    const { rows } = await query(
+      `SELECT * FROM orders WHERE waybill = ? LIMIT 1`,
+      [String(waybill).trim()]
+    );
+    return rows[0] || null;
+  }
+  return null;
+}
+
+async function safeUpdateOrder(orderId, sql, params) {
+  try {
+    await query(sql, params);
+    return true;
+  } catch (err) {
+    if (isMissingColumnError(err)) {
+      console.warn("orders column missing for delivery update:", err.message);
+      return false;
+    }
+    throw err;
+  }
+}
+
+function extractLabelReference(data) {
+  if (!data || typeof data !== "object") return null;
+  const pkg = Array.isArray(data.packages) ? data.packages[0] : null;
+  const candidates = [
+    pkg?.pdf_download,
+    pkg?.pdf_download_link,
+    pkg?.label_url,
+    data.pdf_download,
+    data.pdf_download_link,
+    data.label_url,
+    data.url,
+    data.download_url,
+  ];
+  for (const c of candidates) {
+    if (typeof c === "string" && c.trim()) return c.trim();
+  }
+  try {
+    return JSON.stringify(data).slice(0, 4000);
+  } catch {
+    return null;
+  }
+}
+
+function extractTrackingStatus(data) {
+  if (!data || typeof data !== "object") return null;
+  const shipment = Array.isArray(data.ShipmentData)
+    ? data.ShipmentData[0]
+    : null;
+  const details = shipment?.Shipment || shipment?.shipment || shipment || {};
+  const status =
+    details.Status?.Status ||
+    details.Status?.StatusCode ||
+    details.status ||
+    details.Status ||
+    data.status ||
+    null;
+  if (status == null) return null;
+  return String(status).trim() || null;
+}
+
+/**
+ * GET /api/delhivery/serviceability/:pincode
+ */
+export async function checkPincode(req, res) {
+  try {
+    const pincode = String(req.params.pincode ?? "").trim();
+    if (!pincode || !/^\d{6}$/.test(pincode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid pincode. Pincode must be exactly 6 digits.",
+      });
+    }
+    const data = await checkPincodeServiceability(pincode);
+    return res.status(200).json({ success: true, pincode, data });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery serviceability");
+  }
+}
+
+/**
+ * GET /api/delhivery/tat
+ */
+export async function checkTat(req, res) {
+  try {
+    const origin_pin = String(req.query.origin_pin ?? "").trim();
+    const destination_pin = String(req.query.destination_pin ?? "").trim();
+    const motRaw = req.query.mot;
+    const mot =
+      motRaw === undefined || motRaw === null || String(motRaw).trim() === ""
+        ? "S"
+        : String(motRaw).trim().toUpperCase();
+
+    if (!origin_pin || !/^\d{6}$/.test(origin_pin)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid origin_pin. origin_pin must be exactly 6 digits.",
+      });
+    }
+    if (!destination_pin || !/^\d{6}$/.test(destination_pin)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid destination_pin. destination_pin must be exactly 6 digits.",
+      });
+    }
+
+    const data = await getExpectedTat({ origin_pin, destination_pin, mot });
+    return res.status(200).json({
+      success: true,
+      origin_pin,
+      destination_pin,
+      mot,
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery TAT");
+  }
+}
+
+/**
+ * GET /api/delhivery/waybill?count=
+ */
+export async function fetchWaybills(req, res) {
+  try {
+    const raw = req.query.count;
+    if (raw === undefined || raw === null || String(raw).trim() === "") {
+      return res.status(400).json({
+        success: false,
+        message: "count is required",
+      });
+    }
+    const countStr = String(raw).trim();
+    if (!/^\d+$/.test(countStr)) {
+      return res.status(400).json({
+        success: false,
+        message: "count must be a positive integer",
+      });
+    }
+    const count = Number(countStr);
+    if (!Number.isInteger(count) || count <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "count must be a positive integer greater than 0",
+      });
+    }
+    if (count > MAX_WAYBILL_COUNT) {
+      return res.status(400).json({
+        success: false,
+        message: `count cannot exceed ${MAX_WAYBILL_COUNT}`,
+      });
+    }
+    const data = await getWaybills(count);
+    return res.status(200).json({ success: true, count, data });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery waybill");
+  }
+}
+
+/**
+ * GET /api/delhivery/rate
+ */
+export async function calculateRate(req, res) {
+  try {
+    const md = String(req.query.md ?? "").trim().toUpperCase();
+    const cgmRaw = String(req.query.cgm ?? "").trim();
+    const o_pin = String(req.query.o_pin ?? "").trim();
+    const d_pin = String(req.query.d_pin ?? "").trim();
+    const ss = String(req.query.ss ?? "").trim();
+
+    if (!md || !ALLOWED_MD.includes(md)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid md. Allowed values: ${ALLOWED_MD.join(", ")}`,
+      });
+    }
+    if (!cgmRaw || !/^\d+$/.test(cgmRaw)) {
+      return res.status(400).json({
+        success: false,
+        message: "cgm must be a positive integer (grams)",
+      });
+    }
+    const cgm = Number(cgmRaw);
+    if (!Number.isInteger(cgm) || cgm <= 0 || cgm > MAX_CGM) {
+      return res.status(400).json({
+        success: false,
+        message: `cgm must be between 1 and ${MAX_CGM}`,
+      });
+    }
+    if (!o_pin || !/^\d{6}$/.test(o_pin)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid o_pin. o_pin must be exactly 6 digits.",
+      });
+    }
+    if (!d_pin || !/^\d{6}$/.test(d_pin)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid d_pin. d_pin must be exactly 6 digits.",
+      });
+    }
+    if (!ss || !ALLOWED_SS.includes(ss)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid ss. Allowed values: ${ALLOWED_SS.join(", ")}`,
+      });
+    }
+
+    const data = await getShippingRate({ md, cgm, o_pin, d_pin, ss });
+    return res.status(200).json({
+      success: true,
+      md,
+      cgm,
+      o_pin,
+      d_pin,
+      ss,
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery rate");
+  }
+}
+
+/**
+ * POST /api/delhivery/warehouse/create
+ */
+export async function createWarehouse(req, res) {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const payload = {};
+    for (const field of WAREHOUSE_FIELDS) {
+      const result = requireStringField(body, field);
+      if (!result.ok) {
+        return res.status(400).json({ success: false, message: result.message });
+      }
+      payload[field] = result.value;
+    }
+    if (!/^\d{6}$/.test(payload.pin) || !/^\d{6}$/.test(payload.return_pin)) {
+      return res.status(400).json({
+        success: false,
+        message: "pin and return_pin must be exactly 6 digits",
+      });
+    }
+    const phoneDigits = payload.phone.replace(/\D/g, "");
+    if (phoneDigits.length < 7 || phoneDigits.length > 15) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid phone. Provide a valid contact number.",
+      });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(payload.email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid email format",
+      });
+    }
+
+    const data = await createClientWarehouse(payload);
+    const dataMessage = String(
+      data?.message || data?.msg || data?.error || ""
+    ).toLowerCase();
+    const indicatesFailure =
+      data?.success === false ||
+      data?.error === true ||
+      dataMessage.includes("already") ||
+      dataMessage.includes("exist") ||
+      dataMessage.includes("fail");
+
+    if (indicatesFailure) {
+      const message =
+        (typeof data?.message === "string" && data.message) ||
+        (typeof data?.msg === "string" && data.msg) ||
+        "Warehouse could not be created";
+      const status =
+        dataMessage.includes("already") || dataMessage.includes("exist")
+          ? 409
+          : 400;
+      return res.status(status).json({ success: false, message, data });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Warehouse created successfully",
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery warehouse create");
+  }
+}
+
+function buildShipmentUpdatePayload(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, message: "Invalid JSON body" };
+  }
+  const allowed = ["waybill", ...SHIPMENT_UPDATE_OPTIONAL_FIELDS];
+  const unknownKeys = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unknownKeys.length > 0) {
+    return {
+      ok: false,
+      message: `Unsupported field(s): ${unknownKeys.join(", ")}. Allowed: ${allowed.join(", ")}`,
+    };
+  }
+  const waybill = String(body.waybill ?? "").trim();
+  if (!waybill) {
+    return { ok: false, message: "waybill is required" };
+  }
+  if (!/^\d{8,20}$/.test(waybill)) {
+    return {
+      ok: false,
+      message: "waybill must be an 8–20 digit Delhivery AWB number",
+    };
+  }
+  const payload = { waybill };
+  for (const field of SHIPMENT_UPDATE_OPTIONAL_FIELDS) {
+    if (body[field] === undefined || body[field] === null) continue;
+    const text = String(body[field]).trim();
+    if (!text) continue;
+    if (field === "pt" && !ALLOWED_PAYMENT_MODES_PT.includes(text)) {
+      return {
+        ok: false,
+        message: `pt must be one of: ${ALLOWED_PAYMENT_MODES_PT.join(", ")}`,
+      };
+    }
+    payload[field] =
+      field === "name" || field === "add" || field === "product_details"
+        ? sanitizeDelhiveryText(text)
+        : text;
+  }
+  if (Object.keys(payload).length <= 1) {
+    return {
+      ok: false,
+      message: "Provide at least one field to update besides waybill",
+    };
+  }
+  return { ok: true, payload };
+}
+
+/**
+ * POST /api/delhivery/shipment/update
+ */
+export async function updateShipmentDetails(req, res) {
+  try {
+    const built = buildShipmentUpdatePayload(req.body);
+    if (!built.ok) {
+      return res.status(400).json({ success: false, message: built.message });
+    }
+    const data = await updateShipment(built.payload);
+    const dataMessage = String(
+      data?.message || data?.msg || data?.error || data?.rmk || ""
+    ).toLowerCase();
+    const indicatesFailure =
+      data?.success === false ||
+      data?.error === true ||
+      dataMessage.includes("fail") ||
+      dataMessage.includes("invalid") ||
+      dataMessage.includes("not found") ||
+      dataMessage.includes("cannot");
+
+    if (indicatesFailure) {
+      const message =
+        (typeof data?.message === "string" && data.message) ||
+        (typeof data?.msg === "string" && data.msg) ||
+        (typeof data?.rmk === "string" && data.rmk) ||
+        "Unable to update Delhivery shipment";
+      return res.status(400).json({
+        success: false,
+        message,
+        waybill: built.payload.waybill,
+        data,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Shipment updated successfully",
+      waybill: built.payload.waybill,
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery shipment update");
+  }
+}
+
+/**
+ * POST /api/delhivery/tracking
+ * Body: { waybill, order_id? }
+ */
+export async function trackShipmentStatus(req, res) {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const waybill = String(body.waybill ?? "").trim();
+    if (!waybill) {
+      return res.status(400).json({
+        success: false,
+        message: "Waybill is required",
+      });
+    }
+    if (!/^\d{8,20}$/.test(waybill)) {
+      return res.status(400).json({
+        success: false,
+        message: "waybill must be an 8–20 digit Delhivery AWB number",
+      });
+    }
+
+    const data = await trackShipment(waybill);
+    const trackingStatus = extractTrackingStatus(data);
+
+    const order = await findOrderByIdOrWaybill({
+      orderId: body.order_id ?? body.orderId,
+      waybill,
+    });
+    if (order?.id && trackingStatus) {
+      await safeUpdateOrder(
+        order.id,
+        `UPDATE orders SET
+           tracking_status = ?,
+           tracking_updated_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [trackingStatus.slice(0, 255), order.id]
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Shipment tracking fetched successfully",
+      waybill,
+      tracking_status: trackingStatus,
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery tracking");
+  }
+}
+
+/**
+ * POST /api/delhivery/label
+ * Body: { waybill | wbns, order_id? }
+ */
+export async function generateLabel(req, res) {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const raw =
+      body.waybill !== undefined && body.waybill !== null
+        ? body.waybill
+        : body.wbns;
+
+    if (raw === undefined || raw === null || String(raw).trim() === "") {
+      return res.status(400).json({
+        success: false,
+        message: "AWB is required to generate the label.",
+      });
+    }
+    const waybill = String(raw).trim();
+    if (!/^\d{8,20}$/.test(waybill)) {
+      return res.status(400).json({
+        success: false,
+        message: "waybill must be an 8–20 digit Delhivery AWB number",
+      });
+    }
+
+    const data = await generateShippingLabel(waybill);
+    const labelReference = extractLabelReference(data);
+
+    const order = await findOrderByIdOrWaybill({
+      orderId: body.order_id ?? body.orderId,
+      waybill,
+    });
+    if (order?.id && labelReference) {
+      await safeUpdateOrder(
+        order.id,
+        `UPDATE orders SET
+           label_data = ?,
+           shipment_status = CASE
+             WHEN shipment_status IS NULL OR shipment_status = '' OR shipment_status = 'Created'
+             THEN 'Label Generated'
+             ELSE shipment_status
+           END,
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [labelReference.slice(0, 4000), order.id]
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Shipping label generated successfully",
+      waybill,
+      label_reference: labelReference,
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery label");
+  }
+}
+
+const PICKUP_REQUIRED_FIELDS = [
+  "pickup_time",
+  "pickup_date",
+  "pickup_location",
+  "expected_package_count",
+];
+
+function buildPickupPayload(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { ok: false, message: "Invalid JSON body" };
+  }
+  const allowed = [
+    ...PICKUP_REQUIRED_FIELDS,
+    "order_id",
+    "orderId",
+    "waybill",
+    "force",
+  ];
+  const unknownKeys = Object.keys(body).filter((key) => !allowed.includes(key));
+  if (unknownKeys.length > 0) {
+    return {
+      ok: false,
+      message: `Unsupported field(s): ${unknownKeys.join(", ")}`,
+    };
+  }
+
+  const pickup_time = String(body.pickup_time ?? "").trim();
+  const pickup_date = String(body.pickup_date ?? "").trim();
+  const pickup_location = String(body.pickup_location ?? "").trim();
+  const countRaw = body.expected_package_count;
+
+  if (!pickup_time || !/^\d{2}:\d{2}:\d{2}$/.test(pickup_time)) {
+    return { ok: false, message: "pickup_time must be in HH:MM:SS format" };
+  }
+  if (!pickup_date || !/^\d{4}-\d{2}-\d{2}$/.test(pickup_date)) {
+    return { ok: false, message: "pickup_date must be in YYYY-MM-DD format" };
+  }
+  if (!pickup_location) {
+    return {
+      ok: false,
+      message:
+        "pickup_location is required (exact registered Delhivery warehouse name)",
+    };
+  }
+  if (
+    countRaw === undefined ||
+    countRaw === null ||
+    String(countRaw).trim() === ""
+  ) {
+    return { ok: false, message: "expected_package_count is required" };
+  }
+  const countStr = String(countRaw).trim();
+  if (!/^\d+$/.test(countStr)) {
+    return {
+      ok: false,
+      message: "expected_package_count must be a positive integer",
+    };
+  }
+  const expected_package_count = Number(countStr);
+  if (!Number.isInteger(expected_package_count) || expected_package_count <= 0) {
+    return {
+      ok: false,
+      message: "expected_package_count must be a positive integer greater than 0",
+    };
+  }
+
+  return {
+    ok: true,
+    payload: {
+      pickup_time,
+      pickup_date,
+      pickup_location,
+      expected_package_count,
+    },
+    orderId: body.order_id ?? body.orderId,
+    waybill: body.waybill,
+    force: Boolean(body.force),
+  };
+}
+
+/**
+ * POST /api/delhivery/pickup
+ */
+export async function createPickupRequest(req, res) {
+  try {
+    const built = buildPickupPayload(req.body);
+    if (!built.ok) {
+      return res.status(400).json({ success: false, message: built.message });
+    }
+
+    const order = await findOrderByIdOrWaybill({
+      orderId: built.orderId,
+      waybill: built.waybill,
+    });
+    if (order) {
+      const existing = String(order.pickup_status || "").toLowerCase();
+      if (existing.includes("request") && !built.force) {
+        return res.status(200).json({
+          success: true,
+          message: "Pickup already requested for this order.",
+          already_requested: true,
+          order_id: order.id,
+          pickup_status: order.pickup_status,
+          pickup_requested_at: order.pickup_requested_at || null,
+        });
+      }
+    }
+
+    const data = await requestPickup(built.payload);
+    const pickupRef =
+      data?.pickup_id ||
+      data?.pickupId ||
+      data?.request_id ||
+      data?.data?.pickup_id ||
+      null;
+
+    if (order?.id) {
+      await safeUpdateOrder(
+        order.id,
+        `UPDATE orders SET
+           pickup_status = 'Requested',
+           pickup_requested_at = COALESCE(pickup_requested_at, CURRENT_TIMESTAMP),
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [order.id]
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Pickup request submitted successfully",
+      pickup_reference: pickupRef,
+      order_id: order?.id || null,
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery pickup");
+  }
+}
+
+const NDR_EDIT_DETAIL_FIELDS = ["name", "phone", "add"];
+
+function validateNdrItem(item, index) {
+  const label = `data[${index}]`;
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return { ok: false, message: `${label} must be an object` };
+  }
+  const waybill = String(item.waybill ?? "").trim();
+  if (!waybill || !/^\d{8,20}$/.test(waybill)) {
+    return {
+      ok: false,
+      message: `${label}.waybill must be an 8–20 digit Delhivery AWB number`,
+    };
+  }
+  const act = String(item.act ?? "").trim();
+  if (!NDR_ACTIONS.includes(act)) {
+    return {
+      ok: false,
+      message: `${label}.act must be one of: ${NDR_ACTIONS.join(", ")}`,
+    };
+  }
+  const value = { waybill, act };
+
+  if (act === "RE-ATTEMPT") {
+    return { ok: true, value };
+  }
+
+  if (act === "DEFER_DLV") {
+    const deferred_date = String(item.action_data?.deferred_date ?? "").trim();
+    if (!deferred_date || !/^\d{4}-\d{2}-\d{2}$/.test(deferred_date)) {
+      return {
+        ok: false,
+        message: `${label}.action_data.deferred_date is required (YYYY-MM-DD)`,
+      };
+    }
+    value.action_data = { deferred_date };
+    return { ok: true, value };
+  }
+
+  const actionData = item.action_data;
+  if (!actionData || typeof actionData !== "object") {
+    return {
+      ok: false,
+      message: `${label}.action_data is required for EDIT_DETAILS`,
+    };
+  }
+  const cleaned = {};
+  for (const field of NDR_EDIT_DETAIL_FIELDS) {
+    if (actionData[field] !== undefined && actionData[field] !== null) {
+      const text = sanitizeDelhiveryText(actionData[field]);
+      if (text) {
+        cleaned[field] =
+          field === "phone" ? String(actionData[field]).trim() : text;
+      }
+    }
+  }
+  if (!Object.keys(cleaned).length) {
+    return {
+      ok: false,
+      message: `${label}.action_data must include at least one of: ${NDR_EDIT_DETAIL_FIELDS.join(", ")}`,
+    };
+  }
+  value.action_data = cleaned;
+  return { ok: true, value };
+}
+
+/**
+ * POST /api/delhivery/ndr
+ * Body: { data: [ { waybill, act, action_data? } ], order_id? }
+ */
+export async function updateNdrAction(req, res) {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    if (!Array.isArray(body.data) || body.data.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "data must be a non-empty array of NDR actions",
+      });
+    }
+
+    const validated = [];
+    for (let i = 0; i < body.data.length; i += 1) {
+      const result = validateNdrItem(body.data[i], i);
+      if (!result.ok) {
+        return res.status(400).json({ success: false, message: result.message });
+      }
+      validated.push(result.value);
+    }
+
+    const data = await updateNdr({ data: validated });
+    const first = validated[0];
+    const order = await findOrderByIdOrWaybill({
+      orderId: body.order_id ?? body.orderId,
+      waybill: first?.waybill,
+    });
+    if (order?.id) {
+      await safeUpdateOrder(
+        order.id,
+        `UPDATE orders SET
+           tracking_status = ?,
+           shipment_status = 'NDR',
+           updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [`NDR:${first.act}`.slice(0, 255), order.id]
+      );
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "NDR action submitted successfully",
+      data,
+    });
+  } catch (error) {
+    return handleDelhiveryError(res, error, "Delivery NDR");
   }
 }
