@@ -246,6 +246,25 @@ function adminId(req) {
   return Number(req.user?.admin_id || req.user?.id) || null;
 }
 
+/**
+ * Safety gate: reserving a real Delhivery waybill or creating a real
+ * Delhivery shipment talks to the live courier (DELHIVERY_ENV=production
+ * means a REAL AWB gets consumed immediately). Default is OFF so a paid
+ * order simply stays "pending AWB" until this is deliberately turned on
+ * by setting DELHIVERY_LIVE_FULFILLMENT_ENABLED=true as an environment
+ * variable - a separate, explicit action from clicking buttons in the
+ * admin app. This never touches existing orders/shipments data.
+ */
+function isLiveFulfillmentEnabled() {
+  return String(process.env.DELHIVERY_LIVE_FULFILLMENT_ENABLED || "")
+    .trim()
+    .toLowerCase() === "true";
+}
+
+const LIVE_FULFILLMENT_PAUSED_MESSAGE =
+  "Live Delhivery fulfillment is currently turned off, so this order stays pending AWB. " +
+  "Set DELHIVERY_LIVE_FULFILLMENT_ENABLED=true when you're ready to reserve a real AWB.";
+
 export async function getWarehouse(req, res) {
   try {
     const config = getSafeDelhiveryConfig();
@@ -407,6 +426,22 @@ export async function generateWaybill(req, res) {
     } finally {
       client.release();
     }
+
+    if (!isLiveFulfillmentEnabled()) {
+      await query(
+        "UPDATE shipments SET waybill_processing_token=NULL, waybill_processing_started_at=NULL WHERE id=? AND waybill_processing_token=?",
+        [shipment.id, token]
+      );
+      return res.status(200).json({
+        success: true,
+        pending: true,
+        already_generated: false,
+        waybill: null,
+        shipment_id: shipment.id,
+        message: LIVE_FULFILLMENT_PAUSED_MESSAGE,
+      });
+    }
+
     const data = await getWaybills(1);
     assertDelhiveryAccepted(data, "waybill");
     const waybill = firstWaybill(data);
@@ -475,6 +510,16 @@ export async function createOrderShipment(req, res) {
   client.release();
 
   try {
+    if (!isLiveFulfillmentEnabled()) {
+      await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]);
+      return res.status(200).json({
+        success: true,
+        pending: true,
+        message: LIVE_FULFILLMENT_PAUSED_MESSAGE,
+        shipment_id: shipment.id,
+      });
+    }
+
     const payload = buildShipmentPayload(order, shipment, getTelaquaWarehouse(), getTelaquaProductDefaults());
     const data = await createShipment(payload);
     assertDelhiveryAccepted(data, "shipment_create");
