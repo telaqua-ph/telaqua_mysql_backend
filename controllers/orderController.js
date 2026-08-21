@@ -29,6 +29,48 @@ const ALLOWED_ORDER_STATUSES = [
 
 const ALLOWED_PAYMENT_STATUSES = ["Pending", "Paid", "Failed", "Refunded"];
 
+async function attachLatestShipments(orders) {
+  if (!orders.length) return orders;
+  try {
+    const ids = orders.map((order) => Number(order.id)).filter(Number.isInteger);
+    if (!ids.length) return orders;
+    const placeholders = ids.map(() => "?").join(",");
+    const { rows } = await query(
+      `SELECT * FROM shipments WHERE sequence_no=1 AND order_id IN (${placeholders})`,
+      ids
+    );
+    const byOrder = new Map(rows.map((shipment) => [Number(shipment.order_id), shipment]));
+    return orders.map((order) => {
+      const shipment = byOrder.get(Number(order.id));
+      if (!shipment) return order;
+      return {
+        ...order,
+        shipment_record_id: shipment.id,
+        fulfillment_status: shipment.fulfillment_status || order.fulfillment_status,
+        waybill: shipment.waybill_number || order.waybill,
+        delhivery_shipment_id: shipment.shipment_id || order.delhivery_shipment_id,
+        shipment_status: shipment.shipment_status || order.shipment_status,
+        shipment_status_code: shipment.shipment_status_code,
+        shipment_created_at: shipment.shipment_created_at || order.shipment_created_at,
+        pickup_status: shipment.pickup_requested_at ? "Requested" : order.pickup_status,
+        pickup_requested_at: shipment.pickup_requested_at || order.pickup_requested_at,
+        tracking_status: shipment.shipment_status || order.tracking_status,
+        tracking_updated_at: shipment.last_tracking_update || order.tracking_updated_at,
+        expected_delivery_date: shipment.expected_delivery_date,
+        estimated_tat: shipment.estimated_tat,
+        shipping_charge: shipment.shipping_charge,
+        label_data: shipment.shipping_label_url || order.label_data,
+        ndr_status: shipment.ndr_status,
+        ndr_reason: shipment.ndr_reason,
+        shipment_error: shipment.last_error || order.shipment_error,
+      };
+    });
+  } catch (error) {
+    if (error?.code === "ER_NO_SUCH_TABLE") return orders;
+    throw error;
+  }
+}
+
 function trimStr(value) {
   return typeof value === "string" ? value.trim() : value;
 }
@@ -183,6 +225,7 @@ export async function listOrders(req, res) {
       }
     }
 
+    rows = await attachLatestShipments(rows);
     return res.status(200).json({
       success: true,
       orders: rows,
@@ -518,11 +561,12 @@ export async function getOrderById(req, res) {
       });
     }
 
+    const [withShipment] = await attachLatestShipments(rows);
     const {
       invoice_access_token_hash: _invoiceAccessTokenHash,
       invoice_attempt_token: _invoiceAttemptToken,
       ...safeOrder
-    } = rows[0];
+    } = withShipment;
 
     return res.status(200).json({
       success: true,

@@ -1,63 +1,71 @@
-# Tel-Aqua Delhivery integration
+# Tel-Aqua Delhivery fulfillment
 
-Tel-Aqua Admin is a **logistics control panel** for Delhivery B2C — not create-shipment only. Admins can check serviceability, rates, and TAT; create warehouses; create/update shipments; generate labels; request pickup; track packages; and submit NDR actions from the dashboard.
+Delhivery is an independent logistics layer. It never creates, verifies, refunds,
+or changes a Razorpay payment. Shipment creation requires the existing order's
+`payment_status` to already be `Paid`.
 
-Payment / Razorpay / promo / invoice flows are separate and unchanged.
+## Deployment
 
-## API surface (`/api/delhivery`, requireAuth)
+1. Back up the MySQL database.
+2. Set `DELHIVERY_ENV=staging` and all `DELHIVERY_STAGING_*` URLs, the server-only
+   `DELHIVERY_API_TOKEN`, `TELAQUA_WAREHOUSE_*`, `TELAQUA_PRODUCT_NAME`, and
+   `TELAQUA_PRODUCT_WEIGHT_GM`.
+3. Run `npm run migrate:delhivery`. The migration is additive and backfills legacy
+   order shipment fields into sequence 1 without altering payment fields.
+4. Deploy the API and Admin build. Keep production URLs configured but production
+   is selected only by explicitly setting `DELHIVERY_ENV=production`.
+5. Optionally enable the backend worker with
+   `DELHIVERY_TRACKING_SYNC_ENABLED=true`; its minimum interval is 15 minutes.
 
-| Method | Path | Purpose |
+## Admin API (Bearer admin JWT required)
+
+| Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/serviceability/:pincode` | Pincode serviceability |
-| GET | `/tat` | Expected TAT (`origin_pin`, `destination_pin`, optional `mot`) |
-| GET | `/waybill` | Bulk waybill fetch (`count`) |
-| GET | `/rate` | Shipping rate (`md`, `cgm`, `o_pin`, `d_pin`, `ss`) |
-| POST | `/warehouse/create` | Client warehouse create |
-| POST | `/shipment/create` | Create shipment for an existing order (AWB) |
-| POST | `/create-shipment` | Alias of shipment create |
-| POST | `/shipment/update` | Edit shipment fields by waybill |
-| POST | `/tracking` | Track by waybill; may persist `tracking_status` |
-| POST | `/label` | Packing slip / label; may persist `label_data` |
-| POST | `/pickup` | Pickup request; may persist `pickup_status` |
-| POST | `/ndr` | NDR actions: `RE-ATTEMPT`, `DEFER_DLV`, `EDIT_DETAILS` |
+| GET | `/api/admin/logistics/serviceability/:pincode` | Serviceability |
+| POST | `/api/admin/logistics/tat` | Expected delivery/TAT |
+| POST | `/api/admin/logistics/rate` | Administrative shipping estimate |
+| POST | `/api/admin/logistics/waybill` | Reserve one AWB for an order |
+| GET/POST | `/api/admin/logistics/warehouse` | Show/create configured warehouse |
+| GET | `/api/admin/logistics/orders/:orderId` | Order fulfillment aggregate |
+| POST | `/api/admin/logistics/orders/:orderId/shipment` | Idempotent paid-order shipment creation |
+| GET/PUT | `/api/admin/logistics/shipments/:shipmentId` | Shipment detail/supported edits |
+| GET | `/api/admin/logistics/shipments/:shipmentId/label` | Generate/view label |
+| POST | `/api/admin/logistics/shipments/:shipmentId/pickup` | Request pickup once |
+| POST | `/api/admin/logistics/shipments/:shipmentId/track` | Refresh one shipment |
+| POST | `/api/admin/logistics/shipments/track-active` | Refresh a bounded active batch |
+| GET | `/api/admin/logistics/shipments/:shipmentId/tracking` | Stored timeline |
+| GET/POST | `/api/admin/logistics/shipments/:shipmentId/ndr` | NDR detail/supported action |
 
-## Create shipment flow
+Legacy `/api/delhivery/*` endpoints remain mounted for compatibility.
 
-1. Admin clicks **Send to Delhivery** on a paid order.
-2. Backend: `POST /api/delhivery/shipment/create` with `{ order_id }`.
-3. Backend loads the existing `orders` row and calls Delhivery CMU create.
-4. Delhivery assigns an AWB; Tel-Aqua saves on the same order row:
-   - `waybill`
-   - `shipment_status = 'Created'`
-   - `delhivery_shipment_id`
-   - `shipment_created_at`
+## Flow and invariants
 
-Does not change `order_status` (Created ≠ Shipped).
+`Paid Order -> Serviceability -> TAT/Rate -> Waybill -> Shipment -> Label -> Pickup -> Tracking -> Delivery`
 
-## Post-create ops (in Admin)
+- Payment and fulfillment statuses stay separate.
+- `(order_id, sequence_no)`, `idempotency_key`, and `waybill_number` are unique.
+- A transaction locks the order/current shipment before an external create call.
+- An in-progress token blocks double-clicks and concurrent admins; it expires for
+  recovery after ten minutes.
+- Failed Delhivery operations save a diagnostic error but never change payment.
+- Tracking events append to history. Terminal statuses cannot regress.
+- Delivered/cancelled/returned shipments are excluded from background refresh.
+- Shipment edits are allowlisted and blocked in terminal states.
+- NDR actions are limited to Delhivery-supported `RE-ATTEMPT`, `DEFER_DLV`, and
+  `EDIT_DETAILS`, and only appear while the stored fulfillment state is NDR.
 
-After AWB exists, Admin can:
+## Data model
 
-- **Label** — packing slip for the waybill
-- **Pickup** — request collection (duplicate pickup blocked unless `force`)
-- **Tracking** — refresh status onto the order when found
-- **NDR** — re-attempt, defer delivery, or edit details
-- **Shipment update** — edit allowed Delhivery fields by waybill
+- `orders.fulfillment_status`: separate from `payment_status`.
+- `shipments`: one current sequence with room for later multi-shipment orders;
+  operational fields, raw responses, idempotency lock, and indexed status/AWB.
+- `shipment_tracking_history`: append-only normalized scans.
+- `shipment_audit_log`: important admin operations.
+- `logistics_warehouses`: Delhivery warehouse references; supports multiple rows.
 
-Delhivery One remains available for edge cases (wallet, warehouse naming, manual ops).
+## Staging test checklist
 
-## Environment
-
-- `DELHIVERY_API_TOKEN` — server-only
-- `DELHIVERY_ENV=staging|production`
-- Per-env URL vars: `DELHIVERY_STAGING_*` / `DELHIVERY_PRODUCTION_*` (pincode, TAT, waybill, rate, warehouse, shipment create/update, tracking, label, pickup, NDR)
-- `TELAQUA_WAREHOUSE_NAME` — must match Delhivery pickup location name exactly
-- Package weight/dimensions: `TELAQUA_PRODUCT_WEIGHT_GM`, `TELAQUA_PRODUCT_*_CM`
-
-## Database fields (orders)
-
-- Create flow: `waybill`, `shipment_status`, `delhivery_shipment_id`, `shipment_created_at`, `shipment_error`
-- Optional logistics columns (written when present; missing columns are ignored safely):
-  - `tracking_status`, `tracking_updated_at`
-  - `label_data`
-  - `pickup_status`, `pickup_requested_at`
+Do not mark an integration WORKING until a real staging response is received.
+Test serviceability, TAT, rate, warehouse, waybill, shipment create, label, pickup,
+tracking, update, and NDR in that order. Then rerun the normal Razorpay test-mode
+checkout, verification, webhook, payment-ID persistence, and mobile recovery flow.

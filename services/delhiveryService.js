@@ -8,17 +8,10 @@
  * Token and URLs from process.env only — never hardcoded or fully logged.
  */
 
+import { getDelhiveryToken, getDelhiveryUrl } from "../config/delhiveryConfig.js";
+
 function getDelhiveryApiToken() {
-  const raw = process.env.DELHIVERY_API_TOKEN;
-  if (raw == null) return "";
-  let token = String(raw).trim();
-  if (
-    (token.startsWith('"') && token.endsWith('"')) ||
-    (token.startsWith("'") && token.endsWith("'"))
-  ) {
-    token = token.slice(1, -1).trim();
-  }
-  return token;
+  return getDelhiveryToken();
 }
 
 function getDelhiveryEnv() {
@@ -45,10 +38,21 @@ function requireEnvUrl(name) {
 
 /** Central resolver: DELHIVERY_ENV → STAGING/PRODUCTION URL. */
 function resolveDelhiveryUrl(operationKey) {
-  const env = getDelhiveryEnv();
-  const prefix = env === "staging" ? "DELHIVERY_STAGING_" : "DELHIVERY_PRODUCTION_";
-  const name = `${prefix}${operationKey}`;
-  return { env, baseUrl: requireEnvUrl(name), urlName: name };
+  const operation = {
+    PINCODE_URL: "pincode",
+    TAT_URL: "tat",
+    WAYBILL_URL: "waybill",
+    RATE_URL: "rate",
+    WAREHOUSE_CREATE_URL: "warehouseCreate",
+    SHIPMENT_CREATE_URL: "shipmentCreate",
+    SHIPMENT_UPDATE_URL: "shipmentUpdate",
+    TRACKING_URL: "tracking",
+    LABEL_URL: "label",
+    PICKUP_URL: "pickup",
+    NDR_URL: "ndr",
+  }[operationKey];
+  const { environment, key, url } = getDelhiveryUrl(operation);
+  return { env: environment, baseUrl: url, urlName: key };
 }
 
 function getPincodeUrlTemplate() {

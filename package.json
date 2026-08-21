@@ -15,6 +15,7 @@
     "migrate:customer-auth": "node scripts/migrate-customer-auth.js",
     "migrate:inventory": "node scripts/migrate-inventory.js",
     "migrate:order-views": "node scripts/migrate-order-views.js",
+    "migrate:delhivery": "node scripts/migrate-delhivery-logistics.js",
     "test": "node --test --test-isolation=none"
   },
   "dependencies": {
