@@ -73,6 +73,22 @@ async function hasAdminOrderViewsTable() {
   return Number(rows[0]?.cnt || 0) > 0;
 }
 
+/**
+ * Newer orders are fulfilled through the `shipments` table (see
+ * sql/add_delhivery_logistics.sql), not the legacy orders.waybill /
+ * orders.shipment_status columns. Without this, "Shipments Created"
+ * never counts shipments created via the current Fulfillment flow.
+ */
+async function hasShipmentsTable() {
+  const { rows } = await query(
+    `SELECT COUNT(*) AS cnt
+     FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'shipments'`
+  );
+  return Number(rows[0]?.cnt || 0) > 0;
+}
+
 function revenueExpression(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
   const hasFinalTotal = columns.has("final_total");
@@ -86,22 +102,27 @@ function revenueExpression(columns, alias = "") {
   return "0";
 }
 
-function shipmentPredicate(columns, alias = "") {
+function shipmentPredicate(columns, alias = "", includeShipmentsTable = false) {
   const prefix = alias ? `${alias}.` : "";
   const hasWaybill = columns.has("waybill");
   const hasShipmentStatus = columns.has("shipment_status");
 
-  if (hasWaybill && hasShipmentStatus) {
-    return `COALESCE(NULLIF(TRIM(${prefix}waybill), ''), NULL) IS NOT NULL
-            OR LOWER(COALESCE(${prefix}shipment_status, '')) NOT IN ('', 'not created')`;
-  }
+  const parts = [];
   if (hasWaybill) {
-    return `COALESCE(NULLIF(TRIM(${prefix}waybill), ''), NULL) IS NOT NULL`;
+    parts.push(`COALESCE(NULLIF(TRIM(${prefix}waybill), ''), NULL) IS NOT NULL`);
   }
   if (hasShipmentStatus) {
-    return `LOWER(COALESCE(${prefix}shipment_status, '')) NOT IN ('', 'not created')`;
+    parts.push(`LOWER(COALESCE(${prefix}shipment_status, '')) NOT IN ('', 'not created')`);
   }
-  return "FALSE";
+  // Orders fulfilled via the current shipments-table flow never touch the
+  // legacy orders.waybill / orders.shipment_status columns above, so they
+  // need to be counted from the shipments table directly.
+  if (includeShipmentsTable) {
+    parts.push(`shipment_waybill_number IS NOT NULL`);
+    parts.push(`LOWER(COALESCE(shipment_fulfillment_status, '')) NOT IN ('', 'unfulfilled')`);
+  }
+
+  return parts.length ? parts.join("\n            OR ") : "FALSE";
 }
 
 function paidDateExpression(columns, alias = "") {
@@ -117,16 +138,25 @@ function paidDateExpression(columns, alias = "") {
 async function fetchDashboardStats({ adminId, from, to }) {
   const columns = await readOrdersColumns();
   const includeViews = await hasAdminOrderViewsTable();
+  const includeShipmentsTable = await hasShipmentsTable();
   const params = [adminId, from, to];
   const unseenJoin = includeViews
     ? `LEFT JOIN admin_order_views aov
          ON aov.order_id = o.id
         AND aov.admin_id = ?`
     : "";
+  const shipmentsJoin = includeShipmentsTable
+    ? `LEFT JOIN shipments s
+         ON s.order_id = o.id
+        AND s.sequence_no = 1`
+    : "";
+  const shipmentsSelect = includeShipmentsTable
+    ? "s.waybill_number AS shipment_waybill_number, s.fulfillment_status AS shipment_fulfillment_status,"
+    : "";
   const unseenPredicate = includeViews ? "is_seen = 0" : "FALSE";
   const revenueExpr = revenueExpression(columns);
   const paidDateExpr = paidDateExpression(columns);
-  const shipmentExpr = shipmentPredicate(columns);
+  const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const quantityExpr = columns.has("quantity") ? "quantity" : "0";
   const orderStatusExpr = columns.has("order_status")
     ? "COALESCE(order_status, '')"
@@ -142,9 +172,11 @@ async function fetchDashboardStats({ adminId, from, to }) {
     `WITH order_rows AS (
        SELECT
          o.*,
+         ${shipmentsSelect}
          ${includeViews ? "aov.first_viewed_at IS NOT NULL" : "0"} AS is_seen
        FROM orders o
        ${unseenJoin}
+       ${shipmentsJoin}
      ),
      operational AS (
        SELECT
