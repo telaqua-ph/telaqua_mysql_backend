@@ -17,7 +17,7 @@ try {
     try {
       await client.query(statement);
     } catch (error) {
-      if (error?.code !== "ER_DUP_KEYNAME") throw error;
+      if (!["ER_DUP_KEYNAME", "ER_DUP_FIELDNAME"].includes(error?.code)) throw error;
     }
   }
   const environment = getDelhiveryEnvironment();

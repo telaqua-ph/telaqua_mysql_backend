@@ -35,7 +35,10 @@ test("tracking states map to internal fulfillment states without terminal regres
   assert.equal(mapDelhiveryStatus("Dispatched for Delivery"), "out_for_delivery");
   assert.equal(mapDelhiveryStatus("Delivered"), "delivered");
   assert.equal(mapDelhiveryStatus("RTO Delivered"), "returned");
+  assert.equal(mapDelhiveryStatus("RTO In Transit"), "rto");
   assert.equal(mapDelhiveryStatus("Consignee unavailable"), "ndr");
+  assert.equal(mapDelhiveryStatus("Manifested"), "shipment_created");
+  assert.equal(mapDelhiveryStatus("Pickup Failed"), "pickup_failed");
   assert.equal(canAdvanceFulfillment("in_transit", "picked_up"), false);
   assert.equal(canAdvanceFulfillment("delivered", "in_transit"), false);
 });

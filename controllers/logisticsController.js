@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { pool, query } from "../config/db.js";
 import {
   getDelhiveryEnvironment,
+  getDelhiveryReadiness,
   getSafeDelhiveryConfig,
   getTelaquaProductDefaults,
   getTelaquaWarehouse,
@@ -40,11 +41,70 @@ const mysqlDateTime = (value) => {
 };
 const mysqlDate = (value) => mysqlDateTime(value)?.slice(0, 10) || null;
 
+function logicalFailureMessage(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const candidates = [payload.error, payload.errors, payload.message, payload.msg, payload.remark, payload.remarks, payload.rmk];
+  const hasErrorValue = typeof payload.error === "string"
+    ? Boolean(payload.error.trim())
+    : Array.isArray(payload.error)
+      ? payload.error.length > 0
+      : Boolean(payload.error && (typeof payload.error !== "object" || Object.keys(payload.error).length));
+  const failed = payload.success === false || payload.status === false || hasErrorValue;
+  if (failed) {
+    return candidates.flat().find((value) => typeof value === "string" && value.trim())?.trim() || "Delhivery rejected the request.";
+  }
+  const status = typeof payload.status === "string" ? payload.status : "";
+  if (/fail|error|invalid|reject/i.test(status)) return status;
+  const message = candidates.flat().find((value) => typeof value === "string" && value.trim());
+  if (message && /fail|error|invalid|reject|unauthori[sz]ed|not allowed|not found/i.test(message)) return message.trim();
+  const packages = Array.isArray(payload.packages) ? payload.packages : [];
+  for (const pkg of packages) {
+    const packageStatus = String(pkg?.status || "");
+    if (/fail|error|invalid|reject/i.test(packageStatus) || pkg?.success === false) {
+      return String(pkg?.remarks || pkg?.remark || pkg?.message || packageStatus || "Delhivery rejected the shipment.").trim();
+    }
+  }
+  return null;
+}
+
+function assertDelhiveryAccepted(payload, operation) {
+  const message = logicalFailureMessage(payload);
+  if (!message) return;
+  const error = new Error(message);
+  error.code = "DELHIVERY_UPSTREAM_ERROR";
+  error.status = 422;
+  error.operation = operation;
+  throw error;
+}
+
+function findResponseValue(payload, keys, depth = 0) {
+  if (payload == null || depth > 5) return null;
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const found = findResponseValue(item, keys, depth + 1);
+      if (found !== null && found !== undefined && found !== "") return found;
+    }
+    return null;
+  }
+  if (typeof payload !== "object") return null;
+  for (const key of keys) {
+    if (payload[key] !== null && payload[key] !== undefined && payload[key] !== "") return payload[key];
+  }
+  for (const value of Object.values(payload)) {
+    if (value && typeof value === "object") {
+      const found = findResponseValue(value, keys, depth + 1);
+      if (found !== null && found !== undefined && found !== "") return found;
+    }
+  }
+  return null;
+}
+
 function apiError(res, error, fallback = "Unable to complete logistics request") {
   console.error("Logistics error", { code: error?.code, status: error?.status, message: error?.message });
   if (error?.code === "DELHIVERY_CONFIG_ERROR") return res.status(503).json({ success: false, message: error.message });
   if (error?.code === "DELHIVERY_TIMEOUT") return res.status(504).json({ success: false, message: "Delhivery request timed out." });
   if (error?.code === "DELHIVERY_NETWORK_ERROR") return res.status(502).json({ success: false, message: "Delhivery is currently unavailable." });
+  if (error?.code === "DELHIVERY_INVALID_RESPONSE") return res.status(502).json({ success: false, message: error.message || "Delhivery returned an invalid response." });
   if (error?.code === "DELHIVERY_UPSTREAM_ERROR") {
     const status = [400, 401, 403, 404, 409, 422, 429].includes(error.status) ? error.status : 502;
     return res.status(status).json({ success: false, message: error.message || fallback });
@@ -104,7 +164,7 @@ function shipmentIdentity(payload) {
 }
 
 function labelReference(payload) {
-  return payload?.packages?.[0]?.pdf_download_link || payload?.pdf_download_link || payload?.label_url || payload?.url || payload?.data?.url || null;
+  return findResponseValue(payload, ["pdf_download_link", "pdf_download", "download_url", "label_url", "pdf_url", "url", "pdf", "label"]);
 }
 
 function trackingSummary(payload) {
@@ -113,8 +173,10 @@ function trackingSummary(payload) {
     status: root.Status?.Status || root.Status || root.status || root.CurrentStatus || null,
     code: root.Status?.StatusCode || root.StatusCode || root.status_code || null,
     expectedDeliveryDate: root.ExpectedDeliveryDate || root.EDD || root.expected_delivery_date || null,
-    deliveredAt: root.Status?.StatusDateTime || root.DeliveredDate || null,
+    statusDateTime: root.Status?.StatusDateTime || root.StatusDateTime || root.status_date_time || null,
+    deliveredAt: root.DeliveredDate || null,
     ndrReason: root.Status?.Instructions || root.NDRReason || root.ndr_reason || null,
+    location: root.Status?.StatusLocation || root.CurrentLocation || root.current_location || null,
   };
 }
 
@@ -125,6 +187,61 @@ async function writeAudit(shipmentId, adminId, action, before, after, client = {
   );
 }
 
+async function recordShipmentError(shipmentId, error) {
+  if (!shipmentId) return;
+  await query(
+    "UPDATE shipments SET last_error=?, last_error_response=?, last_error_at=NOW() WHERE id=?",
+    [String(error?.message || "Logistics operation failed").slice(0, 2000), asJson(error?.upstreamBody || null), shipmentId]
+  ).catch(() => {});
+}
+
+function assertShipmentEnvironment(shipment) {
+  const configured = getDelhiveryEnvironment();
+  if (shipment?.environment && shipment.environment !== configured) {
+    throw Object.assign(
+      new Error(`This shipment belongs to the ${shipment.environment} Delhivery environment, while the backend is configured for ${configured}.`),
+      { httpStatus: 409, publicMessage: `Shipment environment mismatch: ${shipment.environment} shipment cannot be processed in ${configured}.` }
+    );
+  }
+}
+
+async function acquireShipmentOperation(shipmentId, operation) {
+  const token = `${operation}:${crypto.randomUUID()}`;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const shipment = await shipmentById(shipmentId, client, true);
+    if (!shipment) {
+      await client.query("ROLLBACK");
+      throw Object.assign(new Error("Shipment not found."), { httpStatus: 404, publicMessage: "Shipment not found." });
+    }
+    assertShipmentEnvironment(shipment);
+    if (shipment.processing_token && shipment.processing_started_at && Date.now() - new Date(shipment.processing_started_at).getTime() < 10 * 60 * 1000) {
+      await client.query("ROLLBACK");
+      throw Object.assign(new Error("Another shipment operation is already in progress."), { httpStatus: 409, publicMessage: "Another shipment operation is already in progress." });
+    }
+    await client.query(
+      "UPDATE shipments SET processing_token=?, processing_started_at=NOW(), last_error=NULL WHERE id=?",
+      [token, shipment.id]
+    );
+    await client.query("COMMIT");
+    return { shipment, token };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function releaseShipmentOperation(shipmentId, token) {
+  if (!shipmentId || !token) return;
+  await query(
+    "UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?",
+    [shipmentId, token]
+  ).catch(() => {});
+}
+
 function adminId(req) {
   return Number(req.user?.admin_id || req.user?.id) || null;
 }
@@ -132,6 +249,7 @@ function adminId(req) {
 export async function getWarehouse(req, res) {
   try {
     const config = getSafeDelhiveryConfig();
+    const readiness = getDelhiveryReadiness();
     let saved = null;
     try {
       const result = await query("SELECT * FROM logistics_warehouses WHERE is_default = 1 ORDER BY id DESC LIMIT 1");
@@ -139,7 +257,7 @@ export async function getWarehouse(req, res) {
     } catch (error) {
       if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
     }
-    return res.json({ success: true, environment: config.environment, warehouse: saved || config.warehouse, configured: Boolean(config.warehouse) });
+    return res.json({ success: true, environment: config.environment, warehouse: saved || config.warehouse, configured: readiness.ready, readiness });
   } catch (error) { return apiError(res, error, "Unable to load warehouse"); }
 }
 
@@ -155,6 +273,7 @@ export async function createWarehouse(req, res) {
       return_city: clean(warehouse.city), return_state: clean(warehouse.state), return_country: "India",
     };
     const data = await createClientWarehouse(payload);
+    assertDelhiveryAccepted(data, "warehouse_create");
     await query(
       `INSERT INTO logistics_warehouses (name, registered_name, address, city, state, pincode, phone, delhivery_reference, is_default, raw_response)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
@@ -166,72 +285,147 @@ export async function createWarehouse(req, res) {
 }
 
 export async function checkServiceability(req, res) {
+  let shipment = null;
   try {
     const pincode = String(req.params.pincode || req.body?.pincode || "").trim();
     if (!/^\d{6}$/.test(pincode)) return res.status(400).json({ success: false, message: "Pincode must be 6 digits." });
-    const data = await checkPincodeServiceability(pincode);
-    const centers = Array.isArray(data?.delivery_codes) ? data.delivery_codes : [];
-    const serviceable = centers.length > 0 && !data?.error;
     const orderId = idOf(req.query.order_id || req.body?.order_id);
     if (orderId) {
-      const shipment = await ensureShipment(orderId);
-      await query("UPDATE shipments SET serviceability_response=?, last_error=NULL WHERE id=?", [asJson(data), shipment.id]);
+      if (!await orderById(orderId)) return res.status(404).json({ success: false, message: "Order not found." });
+      shipment = await ensureShipment(orderId);
     }
-    return res.json({ success: true, serviceable, message: serviceable ? "Pincode is serviceable." : "Pincode is not serviceable.", data });
-  } catch (error) { return apiError(res, error, "Unable to check serviceability"); }
+    const data = await checkPincodeServiceability(pincode);
+    assertDelhiveryAccepted(data, "serviceability");
+    if (!Array.isArray(data?.delivery_codes)) {
+      throw Object.assign(new Error("Delhivery returned an invalid serviceability response."), { code: "DELHIVERY_INVALID_RESPONSE" });
+    }
+    const centers = Array.isArray(data?.delivery_codes) ? data.delivery_codes : [];
+    const serviceable = centers.length > 0 && !data?.error;
+    const serviceabilityMessage = String(
+      data?.message || data?.remark || centers[0]?.postal_code?.remarks ||
+      (serviceable ? "Pincode is serviceable." : "Pincode is not serviceable.")
+    ).slice(0, 500);
+    if (shipment) {
+      await query(
+        "UPDATE shipments SET serviceable=?, serviceability_message=?, serviceability_checked_at=NOW(), serviceability_response=?, last_error=NULL WHERE id=?",
+        [serviceable ? 1 : 0, serviceabilityMessage, asJson(data), shipment.id]
+      );
+    }
+    return res.json({ success: true, serviceable, message: serviceabilityMessage, checked_at: new Date().toISOString(), data });
+  } catch (error) { await recordShipmentError(shipment?.id, error); return apiError(res, error, "Unable to check serviceability"); }
 }
 
 export async function checkTat(req, res) {
+  let shipment = null;
   try {
     const warehouse = getTelaquaWarehouse();
     const body = { ...req.query, ...(req.body || {}) };
     const destination = String(body.destination_pin || body.pincode || "").trim();
     if (!/^\d{6}$/.test(destination)) return res.status(400).json({ success: false, message: "Destination pincode must be 6 digits." });
-    const data = await getExpectedTat({ origin_pin: warehouse.pincode, destination_pin: destination, mot: clean(body.mot || "S") });
-    const edd = data?.expected_delivery_date || data?.edd || data?.data?.expected_delivery_date || null;
-    const tat = data?.tat || data?.data?.tat || data?.days || null;
     const orderId = idOf(body.order_id);
     if (orderId) {
-      const shipment = await ensureShipment(orderId);
-      await query("UPDATE shipments SET expected_delivery_date=?, estimated_tat=?, tat_response=? WHERE id=?", [edd || null, tat == null ? null : String(tat), asJson(data), shipment.id]);
+      if (!await orderById(orderId)) return res.status(404).json({ success: false, message: "Order not found." });
+      shipment = await ensureShipment(orderId);
+    }
+    const data = await getExpectedTat({ origin_pin: warehouse.pincode, destination_pin: destination, mot: clean(body.mot || "S") });
+    assertDelhiveryAccepted(data, "tat");
+    const edd = findResponseValue(data, ["expected_delivery_date", "ExpectedDeliveryDate", "edd", "EDD"]);
+    const tat = findResponseValue(data, ["tat", "TAT", "days", "transit_days", "expected_tat"]);
+    if (edd == null && tat == null) {
+      const error = new Error("Delhivery returned no estimated date or transit time.");
+      error.code = "DELHIVERY_INVALID_RESPONSE";
+      throw error;
+    }
+    if (shipment) {
+      await query("UPDATE shipments SET expected_delivery_date=?, estimated_tat=?, tat_checked_at=NOW(), tat_response=?, last_error=NULL WHERE id=?", [mysqlDate(edd), tat == null ? null : String(tat), asJson(data), shipment.id]);
     }
     return res.json({ success: true, expected_delivery_date: edd, estimated_tat: tat, data });
-  } catch (error) { return apiError(res, error, "Unable to retrieve delivery estimate"); }
+  } catch (error) { await recordShipmentError(shipment?.id, error); return apiError(res, error, "Unable to retrieve delivery estimate"); }
 }
 
 export async function calculateRate(req, res) {
+  let shipment = null;
   try {
     const warehouse = getTelaquaWarehouse();
     const defaults = getTelaquaProductDefaults();
     const body = { ...req.query, ...(req.body || {}) };
     const destination = String(body.d_pin || body.pincode || "").trim();
     if (!/^\d{6}$/.test(destination)) return res.status(400).json({ success: false, message: "Destination pincode must be 6 digits." });
-    const weight = Number(body.cgm || defaults.weightGm);
-    const data = await getShippingRate({ md: body.md || "S", cgm: weight, o_pin: warehouse.pincode, d_pin: destination, ss: body.ss || "Delivered" });
-    const charge = Number(data?.total_amount ?? data?.total ?? data?.charge ?? data?.data?.total_amount);
     const orderId = idOf(body.order_id);
     if (orderId) {
-      const shipment = await ensureShipment(orderId);
-      await query("UPDATE shipments SET shipping_charge=?, rate_response=? WHERE id=?", [Number.isFinite(charge) ? charge : null, asJson(data), shipment.id]);
+      if (!await orderById(orderId)) return res.status(404).json({ success: false, message: "Order not found." });
+      shipment = await ensureShipment(orderId);
     }
-    return res.json({ success: true, shipping_charge: Number.isFinite(charge) ? charge : null, data });
-  } catch (error) { return apiError(res, error, "Unable to calculate shipping charge"); }
+    const weight = Number(body.cgm || defaults.weightGm);
+    const data = await getShippingRate({ md: body.md || "S", cgm: weight, o_pin: warehouse.pincode, d_pin: destination, ss: body.ss || "Delivered" });
+    assertDelhiveryAccepted(data, "rate");
+    const charge = Number(findResponseValue(data, ["total_amount", "gross_amount", "total", "charge", "amount"]));
+    if (!Number.isFinite(charge)) {
+      const error = new Error("Delhivery returned no usable shipping charge.");
+      error.code = "DELHIVERY_INVALID_RESPONSE";
+      throw error;
+    }
+    if (shipment) {
+      await query("UPDATE shipments SET shipping_charge=?, rate_calculated_at=NOW(), rate_response=?, last_error=NULL WHERE id=?", [charge, asJson(data), shipment.id]);
+    }
+    return res.json({ success: true, shipping_charge: charge, calculated_at: new Date().toISOString(), data });
+  } catch (error) { await recordShipmentError(shipment?.id, error); return apiError(res, error, "Unable to calculate shipping charge"); }
 }
 
 export async function generateWaybill(req, res) {
+  const token = crypto.randomUUID();
+  let shipment;
   try {
     const orderId = idOf(req.body?.order_id || req.body?.orderId);
     if (!orderId) return res.status(400).json({ success: false, message: "order_id is required." });
-    const order = await orderById(orderId);
-    if (!order) return res.status(404).json({ success: false, message: "Order not found." });
-    const shipment = await ensureShipment(orderId);
-    if (shipment.waybill_number) return res.json({ success: true, already_generated: true, waybill: shipment.waybill_number, shipment });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const order = await orderById(orderId, client);
+      if (!order) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ success: false, message: "Order not found." });
+      }
+      shipment = await shipmentForOrder(orderId, client, true) || await ensureShipment(orderId, client);
+      assertShipmentEnvironment(shipment);
+      if (shipment.waybill_number) {
+        await client.query("COMMIT");
+        return res.json({ success: true, already_generated: true, waybill: shipment.waybill_number, shipment });
+      }
+      if (shipment.waybill_processing_token && shipment.waybill_processing_started_at && Date.now() - new Date(shipment.waybill_processing_started_at).getTime() < 10 * 60 * 1000) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ success: false, message: "Waybill generation is already in progress." });
+      }
+      await client.query(
+        "UPDATE shipments SET waybill_processing_token=?, waybill_processing_started_at=NOW(), last_error=NULL WHERE id=?",
+        [token, shipment.id]
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
     const data = await getWaybills(1);
+    assertDelhiveryAccepted(data, "waybill");
     const waybill = firstWaybill(data);
-    if (!waybill) return res.status(502).json({ success: false, message: "Unable to generate waybill." });
-    await query("UPDATE shipments SET waybill_number=?, shipment_status='Waybill Generated', last_error=NULL WHERE id=? AND waybill_number IS NULL", [waybill, shipment.id]);
+    if (!waybill) throw Object.assign(new Error("Delhivery returned no valid waybill."), { code: "DELHIVERY_INVALID_RESPONSE" });
+    const saved = await query(
+      "UPDATE shipments SET waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Waybill Generated', waybill_processing_token=NULL, waybill_processing_started_at=NULL, last_error=NULL WHERE id=? AND waybill_number IS NULL AND waybill_processing_token=?",
+      [waybill, shipment.id, token]
+    );
+    if (saved.rowCount !== 1) throw Object.assign(new Error("Waybill could not be saved safely; refresh the shipment before retrying."), { httpStatus: 409, publicMessage: "Waybill could not be saved safely; refresh the shipment before retrying." });
+    await query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [orderId]);
     return res.status(201).json({ success: true, message: "Waybill generated.", waybill, shipment_id: shipment.id, data });
   } catch (error) {
+    if (shipment?.id) {
+      await query(
+        "UPDATE shipments SET waybill_processing_token=NULL, waybill_processing_started_at=NULL WHERE id=? AND waybill_processing_token=?",
+        [shipment.id, token]
+      ).catch(() => {});
+      await recordShipmentError(shipment.id, error);
+    }
     if (error?.code === "ER_DUP_ENTRY") return res.status(409).json({ success: false, message: "Waybill is already assigned." });
     return apiError(res, error, "Unable to generate waybill");
   }
@@ -266,7 +460,9 @@ export async function createOrderShipment(req, res) {
     if (!order) { await client.query("ROLLBACK"); return res.status(404).json({ success: false, message: "Order not found." }); }
     if (String(order.payment_status).toLowerCase() !== "paid") { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Only paid orders can be fulfilled." }); }
     shipment = await shipmentForOrder(orderId, client, true) || await ensureShipment(orderId, client);
+    assertShipmentEnvironment(shipment);
     if (shipment.shipment_created_at || shipment.shipment_id) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "Shipment already exists for this order.", shipment }); }
+    if (shipment.serviceable === 0) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Shipment cannot be created because the destination pincode is not serviceable." }); }
     if (!shipment.waybill_number) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Generate a waybill before creating the shipment." }); }
     if (shipment.processing_token && shipment.processing_started_at && Date.now() - new Date(shipment.processing_started_at).getTime() < 10 * 60 * 1000) {
       await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Shipment creation is already in progress." });
@@ -281,8 +477,10 @@ export async function createOrderShipment(req, res) {
   try {
     const payload = buildShipmentPayload(order, shipment, getTelaquaWarehouse(), getTelaquaProductDefaults());
     const data = await createShipment(payload);
+    assertDelhiveryAccepted(data, "shipment_create");
     const identity = shipmentIdentity(data);
     const waybill = identity.waybill || shipment.waybill_number;
+    if (!waybill) throw Object.assign(new Error("Delhivery accepted the request but returned no AWB."), { code: "DELHIVERY_INVALID_RESPONSE" });
     await query(
       `UPDATE shipments SET shipment_id=?, waybill_number=?, fulfillment_status='shipment_created', shipment_status=?,
        shipment_created_at=NOW(), shipment_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
@@ -292,7 +490,8 @@ export async function createOrderShipment(req, res) {
     await writeAudit(shipment.id, adminId(req), "shipment_created", null, { waybill, shipmentId: identity.shipmentId });
     return res.status(201).json({ success: true, message: "Shipment created successfully.", shipment_id: shipment.id, waybill, data });
   } catch (error) {
-    await query("UPDATE shipments SET last_error=?, processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [String(error?.message || "Shipment creation failed").slice(0, 2000), shipment.id, token]).catch(() => {});
+    await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
+    await recordShipmentError(shipment.id, error);
     return apiError(res, error, "Shipment creation failed");
   }
 }
@@ -316,42 +515,55 @@ export async function getShipmentTracking(req, res) {
   } catch (error) { return apiError(res, error, "Unable to load tracking history"); }
 }
 
-async function refreshOneShipment(shipment, actorId = null) {
+async function refreshOneShipment(inputShipment, actorId = null) {
+  const locked = await acquireShipmentOperation(inputShipment?.id, "tracking");
+  const shipment = locked.shipment;
+  try {
   if (!shipment.waybill_number) throw Object.assign(new Error("Shipment has no waybill."), { httpStatus: 409, publicMessage: "Shipment has no waybill." });
   const data = await trackShipment(shipment.waybill_number);
+  assertDelhiveryAccepted(data, "tracking");
   const summary = trackingSummary(data);
   const events = extractTrackingEvents(data);
+  if (!summary.status && events.length === 0) {
+    throw Object.assign(new Error("Delhivery returned no tracking status or events for this AWB."), { code: "DELHIVERY_INVALID_RESPONSE" });
+  }
   let next = mapDelhiveryStatus(summary.status, summary.code) || shipment.fulfillment_status;
   if (!canAdvanceFulfillment(shipment.fulfillment_status, next)) next = shipment.fulfillment_status;
+  let eventsAdded = 0;
   for (const event of events) {
     const mapped = mapDelhiveryStatus(event.status, event.statusCode);
-    await query(
+    const inserted = await query(
       `INSERT INTO shipment_tracking_history (shipment_id, status, status_code, fulfillment_status, location, instructions, event_time, raw_event)
        SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM DUAL WHERE NOT EXISTS (
          SELECT 1 FROM shipment_tracking_history WHERE shipment_id=? AND status=? AND COALESCE(event_time,'1970-01-01')=COALESCE(?,'1970-01-01') AND COALESCE(location,'')=COALESCE(?,'')
        )`,
       [shipment.id, event.status, event.statusCode || null, mapped, event.location, event.instructions, mysqlDateTime(event.eventTime), asJson(event.raw), shipment.id, event.status, mysqlDateTime(event.eventTime), event.location]
     );
+    eventsAdded += inserted.rowCount;
   }
   const ndrReason = next === "ndr" ? (summary.ndrReason || events.at(-1)?.instructions || null) : shipment.ndr_reason;
   await query(
-    `UPDATE shipments SET fulfillment_status=?, shipment_status=?, shipment_status_code=?, expected_delivery_date=COALESCE(?, expected_delivery_date),
-     last_tracking_update=NOW(), delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+    `UPDATE shipments SET fulfillment_status=?, shipment_status=?, shipment_status_code=?, shipment_status_at=COALESCE(?, shipment_status_at), current_location=?, expected_delivery_date=COALESCE(?, expected_delivery_date),
+     last_tracking_update=NOW(), delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at, ?, NOW()) ELSE delivered_at END,
      ndr_status=CASE WHEN ?='ndr' THEN 'open' ELSE ndr_status END, ndr_reason=?, tracking_response=?, last_error=NULL WHERE id=?`,
-    [next, summary.status, summary.code, mysqlDate(summary.expectedDeliveryDate), next, next, ndrReason, asJson(data), shipment.id]
+    [next, summary.status, summary.code, mysqlDateTime(summary.statusDateTime || events.at(-1)?.eventTime), summary.location || events.at(-1)?.location || null, mysqlDate(summary.expectedDeliveryDate), next, mysqlDateTime(summary.deliveredAt || summary.statusDateTime), next, ndrReason, asJson(data), shipment.id]
   );
   await query("UPDATE orders SET fulfillment_status=? WHERE id=?", [next, shipment.order_id]);
   await writeAudit(shipment.id, actorId, "tracking_refreshed", { fulfillment_status: shipment.fulfillment_status }, { fulfillment_status: next });
-  return { data, status: summary.status, fulfillment_status: next, events_added: events.length };
+  return { data, status: summary.status, fulfillment_status: next, events_added: eventsAdded };
+  } finally {
+    await releaseShipmentOperation(shipment.id, locked.token);
+  }
 }
 
 export async function refreshTracking(req, res) {
+  let shipment = null;
   try {
-    const shipment = await shipmentById(idOf(req.params.shipmentId));
+    shipment = await shipmentById(idOf(req.params.shipmentId));
     if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found." });
     const result = await refreshOneShipment(shipment, adminId(req));
     return res.json({ success: true, message: "Tracking refreshed.", ...result });
-  } catch (error) { return apiError(res, error, "Unable to retrieve tracking information"); }
+  } catch (error) { await recordShipmentError(shipment?.id, error); return apiError(res, error, "Unable to retrieve tracking information"); }
 }
 
 export async function refreshActiveTracking(req, res) {
@@ -359,62 +571,137 @@ export async function refreshActiveTracking(req, res) {
     const limit = Math.min(50, Math.max(1, Number(req.body?.limit) || 20));
     const found = await query(
       `SELECT * FROM shipments WHERE waybill_number IS NOT NULL AND fulfillment_status NOT IN ('delivered','cancelled','returned')
-       AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 15 MINUTE)) ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT ${limit}`
+       AND environment=? AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 15 MINUTE)) ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT ${limit}`,
+      [getDelhiveryEnvironment()]
     );
     const results = [];
     for (const shipment of found.rows) {
       try { results.push({ shipment_id: shipment.id, success: true, ...(await refreshOneShipment(shipment, adminId(req))) }); }
-      catch (error) { results.push({ shipment_id: shipment.id, success: false, message: error.message }); }
+      catch (error) {
+        await query("UPDATE shipments SET last_error=? WHERE id=?", [String(error?.message || "Tracking refresh failed").slice(0, 2000), shipment.id]).catch(() => {});
+        results.push({ shipment_id: shipment.id, success: false, message: error.message });
+      }
     }
     return res.json({ success: true, scanned: found.rows.length, results });
   } catch (error) { return apiError(res, error, "Unable to refresh active shipments"); }
 }
 
 export async function shipmentLabel(req, res) {
+  let shipment = null;
+  let operationToken = null;
   try {
-    const shipment = await shipmentById(idOf(req.params.shipmentId));
+    shipment = await shipmentById(idOf(req.params.shipmentId));
     if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found." });
+    assertShipmentEnvironment(shipment);
     if (!shipment.waybill_number) return res.status(409).json({ success: false, message: "Generate a waybill first." });
+    if (!shipment.shipment_created_at) return res.status(409).json({ success: false, message: "Create the shipment before generating a label." });
+    if (shipment.shipping_label_url) {
+      await query("UPDATE shipments SET label_status=COALESCE(label_status,'generated') WHERE id=?", [shipment.id]);
+      return res.json({ success: true, already_generated: true, message: "Shipping label already exists.", label_url: shipment.shipping_label_url });
+    }
+    const locked = await acquireShipmentOperation(shipment.id, "label");
+    shipment = locked.shipment;
+    operationToken = locked.token;
+    if (shipment.shipping_label_url) {
+      await releaseShipmentOperation(shipment.id, operationToken);
+      operationToken = null;
+      return res.json({ success: true, already_generated: true, message: "Shipping label already exists.", label_url: shipment.shipping_label_url });
+    }
     const data = await generateShippingLabel(shipment.waybill_number);
+    assertDelhiveryAccepted(data, "label");
     const url = labelReference(data);
-    await query("UPDATE shipments SET shipping_label_url=?, label_response=? WHERE id=?", [url, asJson(data), shipment.id]);
+    if (!url || typeof url !== "string") throw Object.assign(new Error("Delhivery returned no accessible label URL or PDF reference."), { code: "DELHIVERY_INVALID_RESPONSE" });
+    const saved = await query("UPDATE shipments SET shipping_label_url=?, label_status='generated', label_generated_at=NOW(), label_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?", [url, asJson(data), shipment.id, operationToken]);
+    if (saved.rowCount !== 1) throw Object.assign(new Error("Label was returned but could not be saved safely. Refresh before retrying."), { httpStatus: 409, publicMessage: "Label could not be saved safely. Refresh before retrying." });
+    operationToken = null;
+    await writeAudit(shipment.id, adminId(req), "label_generated", null, { label_url: url });
     return res.json({ success: true, message: "Shipping label generated.", label_url: url, data });
-  } catch (error) { return apiError(res, error, "Unable to generate shipping label"); }
+  } catch (error) {
+    await releaseShipmentOperation(shipment?.id, operationToken);
+    await recordShipmentError(shipment?.id, error);
+    return apiError(res, error, "Unable to generate shipping label");
+  }
 }
 
 export async function pickupShipment(req, res) {
+  const token = `pickup:${crypto.randomUUID()}`;
+  let shipment;
   try {
-    const shipment = await shipmentById(idOf(req.params.shipmentId));
-    if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found." });
-    if (shipment.pickup_requested_at) return res.status(409).json({ success: false, message: "Pickup has already been requested." });
-    if (!shipment.shipment_created_at) return res.status(409).json({ success: false, message: "Create the shipment before requesting pickup." });
     const warehouse = getTelaquaWarehouse();
     const pickupDate = String(req.body?.pickup_date || "").trim();
     const pickupTime = String(req.body?.pickup_time || "18:30:00").trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(pickupDate)) return res.status(400).json({ success: false, message: "pickup_date must be YYYY-MM-DD." });
+    if (!/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(pickupTime)) return res.status(400).json({ success: false, message: "pickup_time must be HH:MM or HH:MM:SS." });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      shipment = await shipmentById(idOf(req.params.shipmentId), client, true);
+      if (!shipment) { await client.query("ROLLBACK"); return res.status(404).json({ success: false, message: "Shipment not found." }); }
+      assertShipmentEnvironment(shipment);
+      if (shipment.pickup_requested_at) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "Pickup has already been requested.", shipment }); }
+      if (!shipment.shipment_created_at || !shipment.waybill_number) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "A created shipment with an AWB is required before requesting pickup." }); }
+      if (shipment.processing_token && shipment.processing_started_at && Date.now() - new Date(shipment.processing_started_at).getTime() < 10 * 60 * 1000) {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ success: false, message: "Another shipment operation is already in progress." });
+      }
+      await client.query("UPDATE shipments SET processing_token=?, processing_started_at=NOW(), last_error=NULL WHERE id=?", [token, shipment.id]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
     const payload = { pickup_date: pickupDate, pickup_time: pickupTime, pickup_location: warehouse.name, expected_package_count: Number(req.body?.expected_package_count) || 1 };
     const data = await requestPickup(payload);
-    const reference = data?.pickup_id || data?.request_id || data?.data?.pickup_id || null;
-    await query("UPDATE shipments SET fulfillment_status='pickup_requested', shipment_status='Pickup Requested', pickup_requested_at=NOW(), pickup_date=?, pickup_location=?, pickup_reference=?, pickup_response=? WHERE id=?", [pickupDate, warehouse.name, reference, asJson(data), shipment.id]);
+    assertDelhiveryAccepted(data, "pickup");
+    const reference = findResponseValue(data, ["pickup_id", "pickupId", "request_id", "requestId", "reference"]);
+    const scheduledDate = mysqlDate(findResponseValue(data, ["scheduled_date", "pickup_date", "pickupDate"])) || pickupDate;
+    const pickupStatus = String(findResponseValue(data, ["pickup_status", "status"]) || "requested").slice(0, 80);
+    const accepted = reference || data?.success === true || /success|scheduled|request/i.test(String(data?.message || data?.status || ""));
+    if (!accepted) throw Object.assign(new Error("Delhivery did not confirm that the pickup request was accepted."), { code: "DELHIVERY_INVALID_RESPONSE" });
+    const saved = await query("UPDATE shipments SET fulfillment_status='pickup_requested', shipment_status='Pickup Requested', pickup_status=?, pickup_requested_at=NOW(), pickup_date=?, pickup_location=?, pickup_reference=?, pickup_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?", [pickupStatus, scheduledDate, warehouse.name, reference, asJson(data), shipment.id, token]);
+    if (saved.rowCount !== 1) throw Object.assign(new Error("Pickup was accepted but could not be saved safely. Refresh before retrying."), { httpStatus: 409, publicMessage: "Pickup could not be saved safely. Refresh before retrying." });
     await query("UPDATE orders SET fulfillment_status='pickup_requested' WHERE id=?", [shipment.order_id]);
-    await writeAudit(shipment.id, adminId(req), "pickup_requested", null, { pickupDate, reference });
-    return res.json({ success: true, message: "Pickup requested.", pickup_reference: reference, data });
-  } catch (error) { return apiError(res, error, "Unable to request pickup"); }
+    await writeAudit(shipment.id, adminId(req), "pickup_requested", null, { pickupDate: scheduledDate, reference, pickupStatus });
+    return res.json({ success: true, message: "Pickup requested.", pickup_status: pickupStatus, pickup_date: scheduledDate, pickup_reference: reference, data });
+  } catch (error) {
+    if (shipment?.id) {
+      await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
+      await recordShipmentError(shipment.id, error);
+    }
+    return apiError(res, error, "Unable to request pickup");
+  }
 }
 
 const UPDATE_FIELDS = new Set(["name", "add", "phone", "cod", "gm", "shipment_length", "shipment_width", "shipment_height", "product_details", "pt"]);
 export async function updateShipmentDetails(req, res) {
+  let shipment = null;
+  let operationToken = null;
   try {
-    const shipment = await shipmentById(idOf(req.params.shipmentId));
+    shipment = await shipmentById(idOf(req.params.shipmentId));
     if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found." });
+    assertShipmentEnvironment(shipment);
     if (isTerminalFulfillmentStatus(shipment.fulfillment_status)) return res.status(409).json({ success: false, message: "Delivered, cancelled, or returned shipments cannot be updated." });
     const payload = { waybill: shipment.waybill_number };
     for (const [key, value] of Object.entries(req.body || {})) if (UPDATE_FIELDS.has(key) && value !== "" && value != null) payload[key] = value;
     if (Object.keys(payload).length === 1) return res.status(400).json({ success: false, message: "No supported update fields were provided." });
+    const locked = await acquireShipmentOperation(shipment.id, "update");
+    shipment = locked.shipment;
+    operationToken = locked.token;
+    if (isTerminalFulfillmentStatus(shipment.fulfillment_status)) throw Object.assign(new Error("Delivered, cancelled, or returned shipments cannot be updated."), { httpStatus: 409, publicMessage: "Delivered, cancelled, or returned shipments cannot be updated." });
     const data = await updateShipment(payload);
+    assertDelhiveryAccepted(data, "shipment_update");
+    const saved = await query("UPDATE shipments SET shipment_update_response=?, shipment_updated_at=NOW(), processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?", [asJson(data), shipment.id, operationToken]);
+    if (saved.rowCount !== 1) throw Object.assign(new Error("Shipment update succeeded but could not be saved safely."), { httpStatus: 409, publicMessage: "Shipment update could not be saved safely. Refresh before retrying." });
+    operationToken = null;
     await writeAudit(shipment.id, adminId(req), "shipment_updated", null, payload);
     return res.json({ success: true, message: "Shipment updated.", data });
-  } catch (error) { return apiError(res, error, "Unable to update shipment"); }
+  } catch (error) {
+    await releaseShipmentOperation(shipment?.id, operationToken);
+    await recordShipmentError(shipment?.id, error);
+    return apiError(res, error, "Unable to update shipment");
+  }
 }
 
 export async function getNdr(req, res) {
@@ -422,24 +709,39 @@ export async function getNdr(req, res) {
     const shipment = await shipmentById(idOf(req.params.shipmentId));
     if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found." });
     const audits = await query("SELECT action, after_data, created_at FROM shipment_audit_log WHERE shipment_id=? AND action LIKE 'ndr_%' ORDER BY created_at DESC", [shipment.id]);
-    return res.json({ success: true, ndr_status: shipment.ndr_status, ndr_reason: shipment.ndr_reason, latest_attempt: shipment.last_tracking_update, actions: ["RE-ATTEMPT", "DEFER_DLV", "EDIT_DETAILS"], history: audits.rows });
+    const actions = shipment.fulfillment_status === "ndr" ? ["RE-ATTEMPT", "DEFER_DLV", "EDIT_DETAILS"] : [];
+    return res.json({ success: true, ndr_status: shipment.ndr_status, ndr_reason: shipment.ndr_reason, latest_attempt: shipment.last_tracking_update, actions, history: audits.rows });
   } catch (error) { return apiError(res, error, "Unable to load NDR details"); }
 }
 
 export async function submitNdr(req, res) {
+  let shipment = null;
+  let operationToken = null;
   try {
-    const shipment = await shipmentById(idOf(req.params.shipmentId));
+    shipment = await shipmentById(idOf(req.params.shipmentId));
     if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found." });
+    assertShipmentEnvironment(shipment);
     if (shipment.fulfillment_status !== "ndr") return res.status(409).json({ success: false, message: "NDR actions are available only while the shipment is in NDR." });
     const act = String(req.body?.act || "").trim().toUpperCase();
     if (!['RE-ATTEMPT', 'DEFER_DLV', 'EDIT_DETAILS'].includes(act)) return res.status(400).json({ success: false, message: "Unsupported NDR action." });
     const item = { waybill: shipment.waybill_number, act };
     if (req.body?.action_data) item.action_data = req.body.action_data;
+    const locked = await acquireShipmentOperation(shipment.id, "ndr");
+    shipment = locked.shipment;
+    operationToken = locked.token;
+    if (shipment.fulfillment_status !== "ndr") throw Object.assign(new Error("NDR actions are available only while the shipment is in NDR."), { httpStatus: 409, publicMessage: "NDR actions are available only while the shipment is in NDR." });
     const data = await updateNdr({ data: [item] });
-    await query("UPDATE shipments SET ndr_status=?, ndr_response=? WHERE id=?", [`action:${act.toLowerCase()}`, asJson(data), shipment.id]);
+    assertDelhiveryAccepted(data, "ndr");
+    const saved = await query("UPDATE shipments SET ndr_status=?, ndr_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?", [`action:${act.toLowerCase()}`, asJson(data), shipment.id, operationToken]);
+    if (saved.rowCount !== 1) throw Object.assign(new Error("NDR action succeeded but could not be saved safely."), { httpStatus: 409, publicMessage: "NDR action could not be saved safely. Refresh before retrying." });
+    operationToken = null;
     await writeAudit(shipment.id, adminId(req), `ndr_${act.toLowerCase()}`, null, item);
     return res.json({ success: true, message: "NDR action submitted.", data });
-  } catch (error) { return apiError(res, error, "Unable to submit NDR action"); }
+  } catch (error) {
+    await releaseShipmentOperation(shipment?.id, operationToken);
+    await recordShipmentError(shipment?.id, error);
+    return apiError(res, error, "Unable to submit NDR action");
+  }
 }
 
 export async function getOrderLogistics(req, res) {
@@ -453,5 +755,41 @@ export async function getOrderLogistics(req, res) {
     return res.json({ success: true, order_id: orderId, payment_status: order.payment_status, fulfillment_status: shipment?.fulfillment_status || order.fulfillment_status || "unfulfilled", shipment, tracking_history: history });
   } catch (error) { return apiError(res, error, "Unable to load order logistics"); }
 }
+
+async function compatibilityShipment(req) {
+  const body = { ...req.query, ...(req.body || {}) };
+  const orderId = idOf(body.order_id || body.orderId);
+  if (orderId) return shipmentForOrder(orderId);
+  const waybill = String(body.waybill || body.wbns || body.data?.[0]?.waybill || "").trim();
+  if (!waybill) return null;
+  const found = await query("SELECT * FROM shipments WHERE waybill_number=? LIMIT 1", [waybill]);
+  return found.rows[0] || null;
+}
+
+async function runCompatibilityShipmentAction(req, res, handler, transformBody = null) {
+  try {
+    const shipment = await compatibilityShipment(req);
+    if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found. Use an order_id or stored waybill." });
+    req.params = { ...(req.params || {}), shipmentId: String(shipment.id) };
+    if (transformBody) req.body = transformBody(req.body || {});
+    return handler(req, res);
+  } catch (error) {
+    return apiError(res, error, "Unable to resolve shipment");
+  }
+}
+
+export const compatibilityUpdateShipment = (req, res) => runCompatibilityShipmentAction(req, res, updateShipmentDetails);
+export const compatibilityTrackShipment = (req, res) => runCompatibilityShipmentAction(req, res, refreshTracking);
+export const compatibilityLabel = (req, res) => runCompatibilityShipmentAction(req, res, shipmentLabel);
+export const compatibilityPickup = (req, res) => runCompatibilityShipmentAction(req, res, pickupShipment);
+export const compatibilityNdr = (req, res) => runCompatibilityShipmentAction(
+  req,
+  res,
+  submitNdr,
+  (body) => {
+    const item = Array.isArray(body.data) ? body.data[0] || {} : body;
+    return { act: item.act, action_data: item.action_data };
+  }
+);
 
 export { refreshOneShipment };

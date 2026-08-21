@@ -94,4 +94,27 @@ export function getSafeDelhiveryConfig() {
   return { environment, warehouse };
 }
 
+export function getDelhiveryReadiness() {
+  const environment = getDelhiveryEnvironment();
+  const missing = [];
+  try { getDelhiveryToken(); } catch (error) { missing.push("DELHIVERY_API_TOKEN"); }
+  for (const operation of Object.keys(OPERATIONS)) {
+    try { getDelhiveryUrl(operation); } catch (error) {
+      const suffix = OPERATIONS[operation];
+      missing.push(`DELHIVERY_${environment.toUpperCase()}_${suffix}`);
+    }
+  }
+  try { getTelaquaWarehouse(); } catch (error) {
+    for (const key of ["NAME", "ADDRESS", "CITY", "STATE", "PINCODE", "PHONE"]) {
+      if (!String(process.env[`TELAQUA_WAREHOUSE_${key}`] || "").trim()) missing.push(`TELAQUA_WAREHOUSE_${key}`);
+    }
+  }
+  try { getTelaquaProductDefaults(); } catch (error) {
+    if (!String(process.env.TELAQUA_PRODUCT_NAME || "").trim()) missing.push("TELAQUA_PRODUCT_NAME");
+    const weight = Number(process.env.TELAQUA_PRODUCT_WEIGHT_GM);
+    if (!Number.isFinite(weight) || weight <= 0) missing.push("TELAQUA_PRODUCT_WEIGHT_GM");
+  }
+  return { environment, ready: missing.length === 0, missing: [...new Set(missing)] };
+}
+
 export { OPERATIONS as DELHIVERY_OPERATIONS };

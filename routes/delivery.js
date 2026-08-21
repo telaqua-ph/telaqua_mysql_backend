@@ -9,36 +9,39 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import {
-  checkPincode,
-  checkTat,
-  fetchWaybills,
   calculateRate,
+  checkServiceability,
+  checkTat,
+  compatibilityLabel,
+  compatibilityNdr,
+  compatibilityPickup,
+  compatibilityTrackShipment,
+  compatibilityUpdateShipment,
+  createOrderShipment,
   createWarehouse,
-  createShipmentForOrder,
-  updateShipmentDetails,
-  trackShipmentStatus,
-  generateLabel,
-  createPickupRequest,
-  updateNdrAction,
-} from "../controllers/deliveryController.js";
+  generateWaybill,
+} from "../controllers/logisticsController.js";
 
 const router = Router();
 
 router.use(requireAuth);
 
-router.get("/serviceability/:pincode", checkPincode);
+router.get("/serviceability/:pincode", checkServiceability);
 router.get("/tat", checkTat);
-router.get("/waybill", fetchWaybills);
+router.get("/waybill", (req, res) => {
+  req.body = { ...(req.body || {}), order_id: req.query.order_id || req.query.orderId };
+  return generateWaybill(req, res);
+});
 router.get("/rate", calculateRate);
 router.post("/warehouse/create", createWarehouse);
 
-router.post("/shipment/create", createShipmentForOrder);
-router.post("/create-shipment", createShipmentForOrder);
-router.post("/shipment/update", updateShipmentDetails);
+router.post("/shipment/create", createOrderShipment);
+router.post("/create-shipment", createOrderShipment);
+router.post("/shipment/update", compatibilityUpdateShipment);
 
-router.post("/tracking", trackShipmentStatus);
-router.post("/label", generateLabel);
-router.post("/pickup", createPickupRequest);
-router.post("/ndr", updateNdrAction);
+router.post("/tracking", compatibilityTrackShipment);
+router.post("/label", compatibilityLabel);
+router.post("/pickup", compatibilityPickup);
+router.post("/ndr", compatibilityNdr);
 
 export default router;

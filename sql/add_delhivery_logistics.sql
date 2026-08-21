@@ -40,16 +40,26 @@ CREATE TABLE IF NOT EXISTS shipments (
   fulfillment_status VARCHAR(32) NOT NULL DEFAULT 'unfulfilled',
   shipment_status VARCHAR(120) NULL,
   shipment_status_code VARCHAR(60) NULL,
+  shipment_status_at DATETIME NULL,
   shipment_created_at DATETIME NULL,
+  serviceable TINYINT(1) NULL,
+  serviceability_message VARCHAR(500) NULL,
+  serviceability_checked_at DATETIME NULL,
   pickup_requested_at DATETIME NULL,
+  pickup_status VARCHAR(80) NULL,
   pickup_date DATE NULL,
   pickup_location VARCHAR(160) NULL,
   pickup_reference VARCHAR(160) NULL,
   expected_delivery_date DATE NULL,
   estimated_tat VARCHAR(120) NULL,
+  tat_checked_at DATETIME NULL,
   shipping_charge DECIMAL(12,2) NULL,
+  rate_calculated_at DATETIME NULL,
   shipping_label_url TEXT NULL,
+  label_status VARCHAR(80) NULL,
+  label_generated_at DATETIME NULL,
   tracking_url TEXT NULL,
+  current_location VARCHAR(255) NULL,
   last_tracking_update DATETIME NULL,
   delivered_at DATETIME NULL,
   ndr_status VARCHAR(120) NULL,
@@ -63,8 +73,14 @@ CREATE TABLE IF NOT EXISTS shipments (
   pickup_response JSON NULL,
   ndr_response JSON NULL,
   last_error TEXT NULL,
-  processing_token CHAR(36) NULL,
+  last_error_response JSON NULL,
+  last_error_at DATETIME NULL,
+  processing_token VARCHAR(80) NULL,
   processing_started_at DATETIME NULL,
+  waybill_processing_token CHAR(36) NULL,
+  waybill_processing_started_at DATETIME NULL,
+  shipment_update_response JSON NULL,
+  shipment_updated_at DATETIME NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
@@ -78,6 +94,28 @@ CREATE TABLE IF NOT EXISTS shipments (
   CONSTRAINT fk_shipments_order FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE RESTRICT,
   CONSTRAINT fk_shipments_warehouse FOREIGN KEY (warehouse_id) REFERENCES logistics_warehouses(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Existing installations receive the same additive fields safely.
+ALTER TABLE shipments
+  ADD COLUMN IF NOT EXISTS serviceable TINYINT(1) NULL AFTER shipment_created_at,
+  ADD COLUMN IF NOT EXISTS shipment_status_at DATETIME NULL AFTER shipment_status_code,
+  ADD COLUMN IF NOT EXISTS serviceability_message VARCHAR(500) NULL AFTER serviceable,
+  ADD COLUMN IF NOT EXISTS serviceability_checked_at DATETIME NULL AFTER serviceability_message,
+  ADD COLUMN IF NOT EXISTS pickup_status VARCHAR(80) NULL AFTER pickup_requested_at,
+  ADD COLUMN IF NOT EXISTS tat_checked_at DATETIME NULL AFTER estimated_tat,
+  ADD COLUMN IF NOT EXISTS rate_calculated_at DATETIME NULL AFTER shipping_charge,
+  ADD COLUMN IF NOT EXISTS label_status VARCHAR(80) NULL AFTER shipping_label_url,
+  ADD COLUMN IF NOT EXISTS label_generated_at DATETIME NULL AFTER label_status,
+  ADD COLUMN IF NOT EXISTS current_location VARCHAR(255) NULL AFTER tracking_url,
+  ADD COLUMN IF NOT EXISTS last_error_response JSON NULL AFTER last_error,
+  ADD COLUMN IF NOT EXISTS last_error_at DATETIME NULL AFTER last_error_response,
+  ADD COLUMN IF NOT EXISTS waybill_processing_token CHAR(36) NULL AFTER processing_started_at,
+  ADD COLUMN IF NOT EXISTS waybill_processing_started_at DATETIME NULL AFTER waybill_processing_token,
+  ADD COLUMN IF NOT EXISTS shipment_update_response JSON NULL AFTER waybill_processing_started_at,
+  ADD COLUMN IF NOT EXISTS shipment_updated_at DATETIME NULL AFTER shipment_update_response;
+
+ALTER TABLE shipments
+  MODIFY COLUMN processing_token VARCHAR(80) NULL;
 
 CREATE TABLE IF NOT EXISTS shipment_tracking_history (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

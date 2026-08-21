@@ -17,6 +17,31 @@ or changes a Razorpay payment. Shipment creation requires the existing order's
 5. Optionally enable the backend worker with
    `DELHIVERY_TRACKING_SYNC_ENABLED=true`; its minimum interval is 15 minutes.
 
+The Settings page reports server-side readiness and lists missing variable names;
+it never returns tokens or secret values to the browser.
+
+## Required Delhivery account setup
+
+These are real prerequisites, not application fallbacks:
+
+1. In **Delhivery One → Settings → API Setup**, obtain a staging/test token and,
+   only after staging acceptance, request a live token. Store it only as the
+   backend `DELHIVERY_API_TOKEN`. Generating a replacement invalidates the old
+   token. This is normally one-time, except when rotating a token.
+2. In **Delhivery One → Developer Portal**, copy the account-specific staging
+   and production URLs and validate the request/response examples for all eleven
+   operations. Put those URLs in the matching Hostinger environment variables.
+   This is one-time unless Delhivery changes an endpoint or account entitlement.
+3. Register/approve the exact pickup-location name in **Delhivery One warehouse /
+   pickup-location settings**. `TELAQUA_WAREHOUSE_NAME` must match that registered
+   name exactly. This is one-time per warehouse; pickup requests depend on it.
+4. Ask Delhivery support/account management to enable any API that the Developer
+   Portal does not expose for the account (rate, update, label, pickup, or NDR are
+   commonly entitlement/state dependent). This is one-time per account feature.
+5. Keep sufficient account/wallet/service activation for shipment operations.
+   Funding and operational exceptions are recurring account responsibilities;
+   the application does not simulate acceptance when Delhivery rejects a call.
+
 ## Admin API (Bearer admin JWT required)
 
 | Method | Endpoint | Purpose |
@@ -36,7 +61,9 @@ or changes a Razorpay payment. Shipment creation requires the existing order's
 | GET | `/api/admin/logistics/shipments/:shipmentId/tracking` | Stored timeline |
 | GET/POST | `/api/admin/logistics/shipments/:shipmentId/ndr` | NDR detail/supported action |
 
-Legacy `/api/delhivery/*` endpoints remain mounted for compatibility.
+Legacy `/api/delhivery/*` endpoints remain mounted for compatibility, but now
+delegate to the same persisted/idempotent controllers. The legacy waybill route
+requires `order_id`; it no longer allocates anonymous/unassigned AWBs.
 
 ## Flow and invariants
 
@@ -48,6 +75,10 @@ Legacy `/api/delhivery/*` endpoints remain mounted for compatibility.
 - An in-progress token blocks double-clicks and concurrent admins; it expires for
   recovery after ten minutes.
 - Failed Delhivery operations save a diagnostic error but never change payment.
+- HTTP 200 bodies are also validated; a logical failure or missing required AWB,
+  charge, label reference, pickup confirmation, or tracking state is an error.
+- Serviceability, TAT, rate, label, pickup, and current tracking details persist
+  with timestamps and survive an Admin page refresh.
 - Tracking events append to history. Terminal statuses cannot regress.
 - Delivered/cancelled/returned shipments are excluded from background refresh.
 - Shipment edits are allowlisted and blocked in terminal states.
@@ -69,3 +100,8 @@ Do not mark an integration WORKING until a real staging response is received.
 Test serviceability, TAT, rate, warehouse, waybill, shipment create, label, pickup,
 tracking, update, and NDR in that order. Then rerun the normal Razorpay test-mode
 checkout, verification, webhook, payment-ID persistence, and mobile recovery flow.
+
+Do not run shipment/waybill/pickup tests against a real paid order without an
+approved staging token, registered staging pickup location, and a disposable test
+order. The application deliberately returns a configuration error instead of a
+fake success when those prerequisites are absent.

@@ -127,7 +127,12 @@ async function parseDelhiveryJson(response) {
   try {
     return JSON.parse(text);
   } catch {
-    return null;
+    const safeText = String(text)
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 500);
+    return safeText ? { message: safeText, non_json_response: true } : null;
   }
 }
 

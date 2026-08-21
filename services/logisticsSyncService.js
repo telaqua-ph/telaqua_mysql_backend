@@ -1,5 +1,6 @@
 import { query } from "../config/db.js";
 import { refreshOneShipment } from "../controllers/logisticsController.js";
+import { getDelhiveryEnvironment } from "../config/delhiveryConfig.js";
 
 let timer = null;
 let running = false;
@@ -11,13 +12,18 @@ async function runTrackingSync() {
     const { rows } = await query(
       `SELECT * FROM shipments
        WHERE waybill_number IS NOT NULL
+         AND environment = ?
          AND fulfillment_status NOT IN ('delivered','cancelled','returned')
          AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 30 MINUTE))
-       ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT 25`
+       ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT 25`,
+      [getDelhiveryEnvironment()]
     );
     for (const shipment of rows) {
       try { await refreshOneShipment(shipment, null); }
-      catch (error) { console.error("Scheduled Delhivery tracking failed", { shipmentId: shipment.id, message: error?.message }); }
+      catch (error) {
+        await query("UPDATE shipments SET last_error=? WHERE id=?", [String(error?.message || "Scheduled tracking failed").slice(0, 2000), shipment.id]).catch(() => {});
+        console.error("Scheduled Delhivery tracking failed", { shipmentId: shipment.id, message: error?.message });
+      }
     }
   } catch (error) {
     console.error("Scheduled Delhivery tracking sync failed", { code: error?.code, message: error?.message });
