@@ -655,7 +655,7 @@ export async function shipmentLabel(req, res) {
     const data = await generateShippingLabel(shipment.waybill_number);
     assertDelhiveryAccepted(data, "label");
     const url = labelReference(data);
-    if (!url || typeof url !== "string") throw Object.assign(new Error("Delhivery returned no accessible label URL or PDF reference."), { code: "DELHIVERY_INVALID_RESPONSE" });
+    if (!url || typeof url !== "string") throw Object.assign(new Error("Delhivery returned no accessible label URL or PDF reference."), { code: "DELHIVERY_INVALID_RESPONSE", upstreamBody: data });
     const saved = await query("UPDATE shipments SET shipping_label_url=?, label_status='generated', label_generated_at=NOW(), label_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?", [url, asJson(data), shipment.id, operationToken]);
     if (saved.rowCount !== 1) throw Object.assign(new Error("Label was returned but could not be saved safely. Refresh before retrying."), { httpStatus: 409, publicMessage: "Label could not be saved safely. Refresh before retrying." });
     operationToken = null;
