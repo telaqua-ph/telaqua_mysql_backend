@@ -120,6 +120,8 @@ ALTER TABLE shipments
 CREATE TABLE IF NOT EXISTS shipment_tracking_history (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   shipment_id BIGINT UNSIGNED NOT NULL,
+  event_key CHAR(64) NULL,
+  event_source VARCHAR(24) NOT NULL DEFAULT 'tracking_api',
   status VARCHAR(160) NOT NULL,
   status_code VARCHAR(60) NULL,
   fulfillment_status VARCHAR(32) NULL,
@@ -133,6 +135,13 @@ CREATE TABLE IF NOT EXISTS shipment_tracking_history (
   KEY idx_tracking_status (fulfillment_status),
   CONSTRAINT fk_tracking_shipment FOREIGN KEY (shipment_id) REFERENCES shipments(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE shipment_tracking_history
+  ADD COLUMN IF NOT EXISTS event_key CHAR(64) NULL AFTER shipment_id,
+  ADD COLUMN IF NOT EXISTS event_source VARCHAR(24) NOT NULL DEFAULT 'tracking_api' AFTER event_key;
+
+CREATE UNIQUE INDEX uq_tracking_event_key
+  ON shipment_tracking_history (shipment_id, event_key);
 
 CREATE TABLE IF NOT EXISTS shipment_audit_log (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

@@ -4,7 +4,7 @@
  * Delhivery delivery / logistics endpoints (not payment):
  * - Pincode serviceability, TAT, waybill, rate, warehouse
  * - Shipment create / update
- * - Label, pickup, tracking, NDR
+ * - Pickup, tracking, NDR
  * See docs/DELHIVERY_FLOW.md
  */
 
@@ -17,7 +17,6 @@ import {
   createShipment,
   updateShipment,
   trackShipment,
-  generateShippingLabel,
   requestPickup,
   updateNdr,
 } from "../services/delhiveryService.js";
@@ -935,29 +934,6 @@ async function safeUpdateOrder(orderId, sql, params) {
   }
 }
 
-function extractLabelReference(data) {
-  if (!data || typeof data !== "object") return null;
-  const pkg = Array.isArray(data.packages) ? data.packages[0] : null;
-  const candidates = [
-    pkg?.pdf_download,
-    pkg?.pdf_download_link,
-    pkg?.label_url,
-    data.pdf_download,
-    data.pdf_download_link,
-    data.label_url,
-    data.url,
-    data.download_url,
-  ];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim()) return c.trim();
-  }
-  try {
-    return JSON.stringify(data).slice(0, 4000);
-  } catch {
-    return null;
-  }
-}
-
 function extractTrackingStatus(data) {
   if (!data || typeof data !== "object") return null;
   const shipment = Array.isArray(data.ShipmentData)
@@ -1346,67 +1322,6 @@ export async function trackShipmentStatus(req, res) {
     });
   } catch (error) {
     return handleDelhiveryError(res, error, "Delivery tracking");
-  }
-}
-
-/**
- * POST /api/delhivery/label
- * Body: { waybill | wbns, order_id? }
- */
-export async function generateLabel(req, res) {
-  try {
-    const body = req.body && typeof req.body === "object" ? req.body : {};
-    const raw =
-      body.waybill !== undefined && body.waybill !== null
-        ? body.waybill
-        : body.wbns;
-
-    if (raw === undefined || raw === null || String(raw).trim() === "") {
-      return res.status(400).json({
-        success: false,
-        message: "AWB is required to generate the label.",
-      });
-    }
-    const waybill = String(raw).trim();
-    if (!/^\d{8,20}$/.test(waybill)) {
-      return res.status(400).json({
-        success: false,
-        message: "waybill must be an 8–20 digit Delhivery AWB number",
-      });
-    }
-
-    const data = await generateShippingLabel(waybill);
-    const labelReference = extractLabelReference(data);
-
-    const order = await findOrderByIdOrWaybill({
-      orderId: body.order_id ?? body.orderId,
-      waybill,
-    });
-    if (order?.id && labelReference) {
-      await safeUpdateOrder(
-        order.id,
-        `UPDATE orders SET
-           label_data = ?,
-           shipment_status = CASE
-             WHEN shipment_status IS NULL OR shipment_status = '' OR shipment_status = 'Created'
-             THEN 'Label Generated'
-             ELSE shipment_status
-           END,
-           updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [labelReference.slice(0, 4000), order.id]
-      );
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Shipping label generated successfully",
-      waybill,
-      label_reference: labelReference,
-      data,
-    });
-  } catch (error) {
-    return handleDelhiveryError(res, error, "Delivery label");
   }
 }
 

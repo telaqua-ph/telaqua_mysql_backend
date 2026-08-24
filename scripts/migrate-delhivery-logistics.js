@@ -23,6 +23,8 @@ try {
   const environment = getDelhiveryEnvironment();
   await client.query(
     `UPDATE orders SET fulfillment_status = CASE
+       WHEN LOWER(COALESCE(tracking_status,'')) LIKE '%undelivered%' THEN 'ndr'
+       WHEN LOWER(COALESCE(tracking_status,'')) LIKE '%not delivered%' THEN 'ndr'
        WHEN LOWER(COALESCE(tracking_status,'')) LIKE '%delivered%' THEN 'delivered'
        WHEN LOWER(COALESCE(tracking_status,'')) LIKE '%out for delivery%' THEN 'out_for_delivery'
        WHEN LOWER(COALESCE(tracking_status,'')) LIKE '%transit%' THEN 'in_transit'

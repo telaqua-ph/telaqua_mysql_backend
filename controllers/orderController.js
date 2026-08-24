@@ -16,6 +16,8 @@ import {
   dispatchInventoryAlertEmails,
   restoreStockForCancellation,
 } from "../services/inventoryService.js";
+import { deriveOrderDisplayStatus } from "../services/orderDisplayStatus.js";
+import { deriveShipmentStatusDisplay } from "../services/shipmentStatusDisplay.js";
 import { pool } from "../config/db.js";
 
 const ALLOWED_ORDER_STATUSES = [
@@ -86,6 +88,19 @@ async function attachLatestShipments(orders) {
 
 function trimStr(value) {
   return typeof value === "string" ? value.trim() : value;
+}
+
+function withDisplayStatuses(order) {
+  return {
+    ...order,
+    display_status: deriveOrderDisplayStatus(order),
+    shipment_status_display: deriveShipmentStatusDisplay(order),
+    shipment_status_updated_at:
+      order.tracking_status_at ||
+      order.tracking_updated_at ||
+      order.shipment_created_at ||
+      null,
+  };
 }
 
 function isValidEmail(email) {
@@ -239,6 +254,7 @@ export async function listOrders(req, res) {
     }
 
     rows = await attachLatestShipments(rows);
+    rows = rows.map(withDisplayStatuses);
     return res.status(200).json({
       success: true,
       orders: rows,
@@ -580,6 +596,7 @@ export async function getOrderById(req, res) {
       invoice_attempt_token: _invoiceAttemptToken,
       ...safeOrder
     } = withShipment;
+    Object.assign(safeOrder, withDisplayStatuses(safeOrder));
 
     return res.status(200).json({
       success: true,

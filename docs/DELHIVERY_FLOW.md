@@ -16,9 +16,38 @@ or changes a Razorpay payment. Shipment creation requires the existing order's
    is selected only by explicitly setting `DELHIVERY_ENV=production`.
 5. Optionally enable the backend worker with
    `DELHIVERY_TRACKING_SYNC_ENABLED=true`; its minimum interval is 15 minutes.
+6. Configure a private header name/value in `DELHIVERY_WEBHOOK_AUTH_HEADER` and
+   `DELHIVERY_WEBHOOK_AUTH_VALUE`. Give that same header to Delhivery during Scan
+   Push onboarding. Optionally set `DELHIVERY_WEBHOOK_ALLOWED_IPS` to the current
+   source IP list supplied by Delhivery.
 
 The Settings page reports server-side readiness and lists missing variable names;
 it never returns tokens or secret values to the browser.
+
+## Delhivery Scan Push webhook
+
+The public receiver is `POST /api/delhivery/webhook`. It accepts Delhivery's
+official `Shipment.Status` Scan Push JSON, authenticates the client-defined
+header, matches an existing shipment by AWB, stores the raw scan, and returns
+HTTP 200 after a valid event is persisted. The route intentionally does not use
+an admin JWT because Delhivery calls it server-to-server.
+
+Each event has a deterministic SHA-256 key. Duplicate deliveries are ignored,
+older scans remain in history without replacing the current status, and terminal
+states cannot regress. Unknown AWBs and malformed or unauthenticated requests do
+not alter orders or shipments. The existing Tracking API remains the fallback;
+it applies the same timestamp guard before updating MySQL.
+
+For the current production API host, register:
+
+`https://lightpink-reindeer-561421.hostingersite.com/api/delhivery/webhook`
+
+Delhivery's official Scan Push onboarding requires the completed requirement
+document (development and production URL plus the agreed header) to be emailed
+to `lastmile-integration@delhivery.com`, copying the business POC. Delhivery's
+technical team tests the receiver before releasing the production push. Do not
+consider automatic synchronization live until the migration, environment values,
+API deployment, and Delhivery activation are all complete.
 
 ## Required Delhivery account setup
 
@@ -54,7 +83,6 @@ These are real prerequisites, not application fallbacks:
 | GET | `/api/admin/logistics/orders/:orderId` | Order fulfillment aggregate |
 | POST | `/api/admin/logistics/orders/:orderId/shipment` | Idempotent paid-order shipment creation |
 | GET/PUT | `/api/admin/logistics/shipments/:shipmentId` | Shipment detail/supported edits |
-| GET | `/api/admin/logistics/shipments/:shipmentId/label` | Generate/view label |
 | POST | `/api/admin/logistics/shipments/:shipmentId/pickup` | Request pickup once |
 | POST | `/api/admin/logistics/shipments/:shipmentId/track` | Refresh one shipment |
 | POST | `/api/admin/logistics/shipments/track-active` | Refresh a bounded active batch |

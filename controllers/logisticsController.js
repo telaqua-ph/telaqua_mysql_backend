@@ -11,7 +11,6 @@ import {
   checkPincodeServiceability,
   createClientWarehouse,
   createShipment,
-  generateShippingLabel,
   getExpectedTat,
   getShippingRate,
   getWaybills,
@@ -26,6 +25,7 @@ import {
   isTerminalFulfillmentStatus,
   mapDelhiveryStatus,
 } from "../services/logisticsState.js";
+import { isStatusEventCurrent } from "../services/delhiveryWebhookService.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -161,10 +161,6 @@ function shipmentIdentity(payload) {
     shipmentId: String(pkg?.shipment_id || pkg?.refnum || payload?.shipment_id || payload?.reference || "").trim() || null,
     status: String(pkg?.status || payload?.status || payload?.message || "Shipment Created").trim(),
   };
-}
-
-function labelReference(payload) {
-  return findResponseValue(payload, ["pdf_download_link", "pdf_download", "download_url", "label_url", "pdf_url", "url", "pdf", "label"]);
 }
 
 function trackingSummary(payload) {
@@ -572,7 +568,17 @@ async function refreshOneShipment(inputShipment, actorId = null) {
   if (!summary.status && events.length === 0) {
     throw Object.assign(new Error("Delhivery returned no tracking status or events for this AWB."), { code: "DELHIVERY_INVALID_RESPONSE" });
   }
-  let next = mapDelhiveryStatus(summary.status, summary.code) || shipment.fulfillment_status;
+  const latestEvent = events.at(-1);
+  const latestStatus = summary.status || latestEvent?.status;
+  const latestCode = summary.code || latestEvent?.statusCode;
+  const incomingStatusAt = mysqlDateTime(summary.statusDateTime || latestEvent?.eventTime);
+  const currentEvent = !incomingStatusAt || isStatusEventCurrent(
+    shipment.shipment_status_at,
+    incomingStatusAt
+  );
+  let next = currentEvent
+    ? mapDelhiveryStatus(latestStatus, latestCode) || shipment.fulfillment_status
+    : shipment.fulfillment_status;
   if (!canAdvanceFulfillment(shipment.fulfillment_status, next)) next = shipment.fulfillment_status;
   let eventsAdded = 0;
   for (const event of events) {
@@ -586,16 +592,23 @@ async function refreshOneShipment(inputShipment, actorId = null) {
     );
     eventsAdded += inserted.rowCount;
   }
-  const ndrReason = next === "ndr" ? (summary.ndrReason || events.at(-1)?.instructions || null) : shipment.ndr_reason;
-  await query(
-    `UPDATE shipments SET fulfillment_status=?, shipment_status=?, shipment_status_code=?, shipment_status_at=COALESCE(?, shipment_status_at), current_location=?, expected_delivery_date=COALESCE(?, expected_delivery_date),
-     last_tracking_update=NOW(), delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at, ?, NOW()) ELSE delivered_at END,
-     ndr_status=CASE WHEN ?='ndr' THEN 'open' ELSE ndr_status END, ndr_reason=?, tracking_response=?, last_error=NULL WHERE id=?`,
-    [next, summary.status, summary.code, mysqlDateTime(summary.statusDateTime || events.at(-1)?.eventTime), summary.location || events.at(-1)?.location || null, mysqlDate(summary.expectedDeliveryDate), next, mysqlDateTime(summary.deliveredAt || summary.statusDateTime), next, ndrReason, asJson(data), shipment.id]
-  );
-  await query("UPDATE orders SET fulfillment_status=? WHERE id=?", [next, shipment.order_id]);
-  await writeAudit(shipment.id, actorId, "tracking_refreshed", { fulfillment_status: shipment.fulfillment_status }, { fulfillment_status: next });
-  return { data, status: summary.status, fulfillment_status: next, events_added: eventsAdded };
+  const ndrReason = next === "ndr" ? (summary.ndrReason || latestEvent?.instructions || null) : shipment.ndr_reason;
+  if (currentEvent) {
+    await query(
+      `UPDATE shipments SET fulfillment_status=?, shipment_status=?, shipment_status_code=?, shipment_status_at=COALESCE(?, shipment_status_at), current_location=?, expected_delivery_date=COALESCE(?, expected_delivery_date),
+       last_tracking_update=NOW(), delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at, ?, NOW()) ELSE delivered_at END,
+       ndr_status=CASE WHEN ?='ndr' THEN 'open' ELSE ndr_status END, ndr_reason=?, tracking_response=?, last_error=NULL WHERE id=?`,
+      [next, latestStatus, latestCode, incomingStatusAt, summary.location || latestEvent?.location || null, mysqlDate(summary.expectedDeliveryDate), next, mysqlDateTime(summary.deliveredAt || summary.statusDateTime || latestEvent?.eventTime), next, ndrReason, asJson(data), shipment.id]
+    );
+    await query("UPDATE orders SET fulfillment_status=? WHERE id=?", [next, shipment.order_id]);
+    await writeAudit(shipment.id, actorId, "tracking_refreshed", { fulfillment_status: shipment.fulfillment_status }, { fulfillment_status: next });
+  } else {
+    await query(
+      "UPDATE shipments SET last_tracking_update=NOW(), tracking_response=?, last_error=NULL WHERE id=?",
+      [asJson(data), shipment.id]
+    );
+  }
+  return { data, status: currentEvent ? latestStatus : shipment.shipment_status, fulfillment_status: next, events_added: eventsAdded, stale_ignored: !currentEvent };
   } finally {
     await releaseShipmentOperation(shipment.id, locked.token);
   }
@@ -629,43 +642,6 @@ export async function refreshActiveTracking(req, res) {
     }
     return res.json({ success: true, scanned: found.rows.length, results });
   } catch (error) { return apiError(res, error, "Unable to refresh active shipments"); }
-}
-
-export async function shipmentLabel(req, res) {
-  let shipment = null;
-  let operationToken = null;
-  try {
-    shipment = await shipmentById(idOf(req.params.shipmentId));
-    if (!shipment) return res.status(404).json({ success: false, message: "Shipment not found." });
-    assertShipmentEnvironment(shipment);
-    if (!shipment.waybill_number) return res.status(409).json({ success: false, message: "Generate a waybill first." });
-    if (!shipment.shipment_created_at) return res.status(409).json({ success: false, message: "Create the shipment before generating a label." });
-    if (shipment.shipping_label_url) {
-      await query("UPDATE shipments SET label_status=COALESCE(label_status,'generated') WHERE id=?", [shipment.id]);
-      return res.json({ success: true, already_generated: true, message: "Shipping label already exists.", label_url: shipment.shipping_label_url });
-    }
-    const locked = await acquireShipmentOperation(shipment.id, "label");
-    shipment = locked.shipment;
-    operationToken = locked.token;
-    if (shipment.shipping_label_url) {
-      await releaseShipmentOperation(shipment.id, operationToken);
-      operationToken = null;
-      return res.json({ success: true, already_generated: true, message: "Shipping label already exists.", label_url: shipment.shipping_label_url });
-    }
-    const data = await generateShippingLabel(shipment.waybill_number);
-    assertDelhiveryAccepted(data, "label");
-    const url = labelReference(data);
-    if (!url || typeof url !== "string") throw Object.assign(new Error("Delhivery returned no accessible label URL or PDF reference."), { code: "DELHIVERY_INVALID_RESPONSE", upstreamBody: data });
-    const saved = await query("UPDATE shipments SET shipping_label_url=?, label_status='generated', label_generated_at=NOW(), label_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?", [url, asJson(data), shipment.id, operationToken]);
-    if (saved.rowCount !== 1) throw Object.assign(new Error("Label was returned but could not be saved safely. Refresh before retrying."), { httpStatus: 409, publicMessage: "Label could not be saved safely. Refresh before retrying." });
-    operationToken = null;
-    await writeAudit(shipment.id, adminId(req), "label_generated", null, { label_url: url });
-    return res.json({ success: true, message: "Shipping label generated.", label_url: url, data });
-  } catch (error) {
-    await releaseShipmentOperation(shipment?.id, operationToken);
-    await recordShipmentError(shipment?.id, error);
-    return apiError(res, error, "Unable to generate shipping label");
-  }
 }
 
 export async function pickupShipment(req, res) {
@@ -825,7 +801,6 @@ async function runCompatibilityShipmentAction(req, res, handler, transformBody =
 
 export const compatibilityUpdateShipment = (req, res) => runCompatibilityShipmentAction(req, res, updateShipmentDetails);
 export const compatibilityTrackShipment = (req, res) => runCompatibilityShipmentAction(req, res, refreshTracking);
-export const compatibilityLabel = (req, res) => runCompatibilityShipmentAction(req, res, shipmentLabel);
 export const compatibilityPickup = (req, res) => runCompatibilityShipmentAction(req, res, pickupShipment);
 export const compatibilityNdr = (req, res) => runCompatibilityShipmentAction(
   req,

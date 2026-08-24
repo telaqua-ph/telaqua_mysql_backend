@@ -12,7 +12,6 @@ import {
   calculateRate,
   checkServiceability,
   checkTat,
-  compatibilityLabel,
   compatibilityNdr,
   compatibilityPickup,
   compatibilityTrackShipment,
@@ -40,7 +39,6 @@ router.post("/create-shipment", createOrderShipment);
 router.post("/shipment/update", compatibilityUpdateShipment);
 
 router.post("/tracking", compatibilityTrackShipment);
-router.post("/label", compatibilityLabel);
 router.post("/pickup", compatibilityPickup);
 router.post("/ndr", compatibilityNdr);
 

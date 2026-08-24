@@ -20,6 +20,7 @@ import customersRoutes from "./routes/customers.js";
 import customerAccountRoutes from "./routes/customerAccount.js";
 import dashboardRoutes from "./routes/dashboard.js";
 import deliveryRoutes from "./routes/delivery.js";
+import delhiveryWebhookRoutes from "./routes/delhiveryWebhook.js";
 import logisticsRoutes from "./routes/logisticsRoutes.js";
 import promoRoutes from "./routes/promo.js";
 import promoCodesRoutes from "./routes/promoCodes.js";
@@ -102,6 +103,11 @@ app.post(
   "/api/webhooks/swipe",
   express.raw({ type: "application/json", limit: "1mb" }),
   handleSwipeWebhook
+);
+app.use(
+  "/api/delhivery/webhook",
+  express.raw({ type: "*/*", limit: "256kb" }),
+  delhiveryWebhookRoutes
 );
 app.use(express.json({ limit: "1mb" }));
 

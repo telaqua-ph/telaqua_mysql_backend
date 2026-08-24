@@ -3,7 +3,7 @@
  *
  * Delhivery B2C logistics (staging + production via DELHIVERY_ENV):
  * serviceability, TAT, waybill, rate, warehouse, shipment create/update,
- * tracking, label, pickup, NDR.
+ * tracking, pickup, NDR.
  *
  * Token and URLs from process.env only — never hardcoded or fully logged.
  */
@@ -47,7 +47,6 @@ function resolveDelhiveryUrl(operationKey) {
     SHIPMENT_CREATE_URL: "shipmentCreate",
     SHIPMENT_UPDATE_URL: "shipmentUpdate",
     TRACKING_URL: "tracking",
-    LABEL_URL: "label",
     PICKUP_URL: "pickup",
     NDR_URL: "ndr",
   }[operationKey];
@@ -79,9 +78,6 @@ function getShipmentUpdateBaseUrl() {
 }
 function getTrackingBaseUrl() {
   return resolveDelhiveryUrl("TRACKING_URL");
-}
-function getLabelBaseUrl() {
-  return resolveDelhiveryUrl("LABEL_URL");
 }
 function getPickupBaseUrl() {
   return resolveDelhiveryUrl("PICKUP_URL");
@@ -362,18 +358,6 @@ export async function trackShipment(waybill) {
   url.searchParams.set("waybill", String(waybill));
   return delhiveryGet(url.toString(), token, {
     api: "shipment_tracking",
-    env,
-  });
-}
-
-export async function generateShippingLabel(waybill) {
-  const token = requireToken();
-  const { env, baseUrl } = getLabelBaseUrl();
-  console.log(`Delhivery label environment: ${env}`);
-  const url = new URL(baseUrl);
-  url.searchParams.set("wbns", String(waybill));
-  return delhiveryGet(url.toString(), token, {
-    api: "packing_slip_label",
     env,
   });
 }

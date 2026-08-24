@@ -7,7 +7,6 @@ const OPERATIONS = Object.freeze({
   shipmentCreate: "SHIPMENT_CREATE_URL",
   shipmentUpdate: "SHIPMENT_UPDATE_URL",
   tracking: "TRACKING_URL",
-  label: "LABEL_URL",
   pickup: "PICKUP_URL",
   ndr: "NDR_URL",
 });

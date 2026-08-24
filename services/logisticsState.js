@@ -28,19 +28,29 @@ export function isTerminalFulfillmentStatus(status) {
 }
 
 export function mapDelhiveryStatus(status, statusCode = "") {
-  const value = `${status || ""} ${statusCode || ""}`.toLowerCase();
+  const rawStatus = String(status || "").trim().toLowerCase();
+  const rawCode = String(statusCode || "").trim().toLowerCase();
+  const value = `${rawStatus} ${rawCode}`;
+  const statusType = rawCode.split(/[\s:]/).find((part) => /^(ud|dl|rt|pp|pu|cn)$/.test(part));
   if (/rto delivered|returned|return delivered/.test(value)) return "returned";
-  if (/delivered|eod-38/.test(value)) return "delivered";
-  if (/\brto\b|return to origin/.test(value)) return "rto";
-  if (/cancel/.test(value)) return "cancelled";
-  if (/pickup failed|pickup exception/.test(value)) return "pickup_failed";
+  if (statusType === "dl" && rawStatus === "rto") return "returned";
+  if (statusType === "rt") return "rto";
   if (/ndr|undelivered|not delivered|consignee unavailable|address issue/.test(value)) return "ndr";
-  if (/out for delivery|dispatched for delivery/.test(value)) return "out_for_delivery";
+  if (/delivered|eod-38/.test(value) && statusType !== "cn") return "delivered";
+  if (/\brto\b|return to origin/.test(value)) return "rto";
+  if (/cancel|closed/.test(value) || statusType === "cn") return "cancelled";
+  if (/pickup failed|pickup exception/.test(value)) return "pickup_failed";
+  if (
+    /out for delivery|dispatched for delivery/.test(value) ||
+    (statusType === "ud" && rawStatus === "dispatched")
+  ) return "out_for_delivery";
   if (/in transit|transit|bagged|connected/.test(value)) return "in_transit";
+  if (statusType === "ud" && rawStatus === "pending") return "in_transit";
   if (/picked up|pickup complete|collected/.test(value)) return "picked_up";
+  if (statusType === "pp" && /open|scheduled|dispatched/.test(rawStatus)) return "pickup_requested";
   if (/pickup request|pickup scheduled/.test(value)) return "pickup_requested";
   if (/failed|damaged|lost/.test(value)) return "delivery_failed";
-  if (/created|pending|not picked|manifested|ready for pickup/.test(value)) return "shipment_created";
+  if (/created|pending awb|ready to ship|not picked|manifested|ready for pickup/.test(value)) return "shipment_created";
   return null;
 }
 

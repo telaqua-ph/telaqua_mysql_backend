@@ -15,7 +15,6 @@ import {
   pickupShipment,
   refreshActiveTracking,
   refreshTracking,
-  shipmentLabel,
   submitNdr,
   updateShipmentDetails,
 } from "../controllers/logisticsController.js";
@@ -32,7 +31,6 @@ router.post("/warehouse", createWarehouse);
 router.get("/orders/:orderId", getOrderLogistics);
 router.post("/orders/:orderId/shipment", createOrderShipment);
 router.get("/shipments/:shipmentId", getShipment);
-router.get("/shipments/:shipmentId/label", shipmentLabel);
 router.post("/shipments/:shipmentId/pickup", pickupShipment);
 router.post("/shipments/track-active", refreshActiveTracking);
 router.post("/shipments/:shipmentId/track", refreshTracking);
