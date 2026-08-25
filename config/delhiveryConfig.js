@@ -71,14 +71,25 @@ export function getTelaquaWarehouse() {
   };
 }
 
+function parsePositiveIntEnv(name) {
+  const raw = String(process.env[name] || "").trim();
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 export function getTelaquaProductDefaults() {
   const weightGm = Number(process.env.TELAQUA_PRODUCT_WEIGHT_GM);
   if (!Number.isFinite(weightGm) || weightGm <= 0) {
     throw configError("TELAQUA_PRODUCT_WEIGHT_GM must be a positive number");
   }
   return {
-    name: envText("TELAQUA_PRODUCT_NAME"),
+    name: String(process.env.TELAQUA_PRODUCT_NAME || "").replace(/\s+/g, " ").trim() || "Tel-Aqua Product",
     weightGm: Math.round(weightGm),
+    lengthCm: parsePositiveIntEnv("TELAQUA_PRODUCT_LENGTH_CM"),
+    widthCm: parsePositiveIntEnv("TELAQUA_PRODUCT_WIDTH_CM"),
+    heightCm: parsePositiveIntEnv("TELAQUA_PRODUCT_HEIGHT_CM"),
+    sellerName: String(process.env.TELAQUA_BUSINESS_NAME || "Tel-Aqua").trim(),
   };
 }
 
@@ -108,7 +119,13 @@ export function getDelhiveryReadiness() {
       if (!String(process.env[`TELAQUA_WAREHOUSE_${key}`] || "").trim()) missing.push(`TELAQUA_WAREHOUSE_${key}`);
     }
   }
-  try { getTelaquaProductDefaults(); } catch (error) {
+  try {
+    const defaults = getTelaquaProductDefaults();
+    if (!String(process.env.TELAQUA_PRODUCT_NAME || "").trim()) missing.push("TELAQUA_PRODUCT_NAME");
+    if (defaults.lengthCm == null) missing.push("TELAQUA_PRODUCT_LENGTH_CM");
+    if (defaults.widthCm == null) missing.push("TELAQUA_PRODUCT_WIDTH_CM");
+    if (defaults.heightCm == null) missing.push("TELAQUA_PRODUCT_HEIGHT_CM");
+  } catch (error) {
     if (!String(process.env.TELAQUA_PRODUCT_NAME || "").trim()) missing.push("TELAQUA_PRODUCT_NAME");
     const weight = Number(process.env.TELAQUA_PRODUCT_WEIGHT_GM);
     if (!Number.isFinite(weight) || weight <= 0) missing.push("TELAQUA_PRODUCT_WEIGHT_GM");

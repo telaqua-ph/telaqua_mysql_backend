@@ -27,6 +27,7 @@ import {
 } from "../services/logisticsState.js";
 import { isStatusEventCurrent } from "../services/delhiveryWebhookService.js";
 import { canFulfillOrder } from "../services/paymentMode.js";
+import { buildShipmentPayload } from "../services/shipmentPayload.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -463,19 +464,6 @@ export async function generateWaybill(req, res) {
   }
 }
 
-function buildShipmentPayload(order, shipment, warehouse, product) {
-  const quantity = Math.max(1, Number(order.quantity) || 1);
-  const paymentMode = /cod|cash/i.test(String(order.payment_method || "")) ? "COD" : "Pre-paid";
-  const item = {
-    name: clean(order.customer_name), add: clean(order.address), city: clean(order.city), state: clean(order.state),
-    pin: String(order.pincode), country: "India", phone: String(order.phone), order: String(order.order_number || order.id),
-    payment_mode: paymentMode, products_desc: clean(product.name), quantity: String(quantity),
-    total_amount: Number(order.final_total ?? order.total_amount), weight: String(product.weightGm * quantity),
-    waybill: shipment.waybill_number,
-  };
-  if (order.email) item.email = String(order.email);
-  if (paymentMode === "COD") item.cod_amount = String(item.total_amount);
-  return { pickup_location: { name: warehouse.name, add: warehouse.address, city: warehouse.city, state: warehouse.state, pin: warehouse.pincode, phone: warehouse.phone, country: "India" }, shipments: [item] };
 }
 
 export async function createOrderShipment(req, res) {
