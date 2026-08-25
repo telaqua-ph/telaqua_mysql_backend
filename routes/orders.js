@@ -7,6 +7,7 @@ import {
   listOrders,
   createOrder,
   createManualCodOrder,
+  createWebsiteCodOrder,
   collectCodPayment,
   getOrderById,
   updateOrder,
@@ -26,6 +27,7 @@ const router = Router();
 
 router.get("/", requireAuth, listOrders);
 router.post("/", createOrder);
+router.post("/website-cod", createWebsiteCodOrder);
 router.post("/manual-cod", requireAuth, createManualCodOrder);
 router.post("/:id/mark-seen", requireAuth, markOrderSeen);
 router.post("/reconcile-razorpay", requireAuth, reconcileRazorpayPayment);
