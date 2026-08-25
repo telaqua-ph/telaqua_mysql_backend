@@ -12,6 +12,7 @@ import {
   triggerOrderFulfillmentAsync,
 } from "../services/confirmRazorpayPayment.js";
 import { query } from "../config/db.js";
+import { notifyPaymentFailedCheckoutReminder } from "../services/checkoutReminderService.js";
 
 function validSignature(rawBody, received, secret) {
   const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
@@ -121,6 +122,9 @@ export async function handleRazorpayWebhook(req, res) {
           paymentAmount: payloadPayment.amount || null,
         });
         return res.status(404).json({ success: false, message: "Order not found" });
+      }
+      if (failed.status === "failed" && failed.order) {
+        notifyPaymentFailedCheckoutReminder(failed.order);
       }
       return res.status(200).json({ success: true });
     }

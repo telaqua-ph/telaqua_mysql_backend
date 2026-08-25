@@ -9,6 +9,7 @@ import "dotenv/config";
 import app from "./app.js";
 import { isDatabaseConfigured } from "./config/db.js";
 import { startLogisticsTrackingSync, stopLogisticsTrackingSync } from "./services/logisticsSyncService.js";
+import { startCheckoutReminderSync, stopCheckoutReminderSync } from "./services/checkoutReminderService.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
@@ -37,6 +38,7 @@ try {
   server = app.listen(PORT, HOST, () => {
     console.log(`Tel-Aqua API running on http://${HOST}:${PORT}`);
     startLogisticsTrackingSync();
+    startCheckoutReminderSync();
   });
 
   server.on("error", (err) => {
@@ -57,6 +59,7 @@ try {
 function shutdown(signal) {
   console.log(`Received ${signal}, shutting down...`);
   stopLogisticsTrackingSync();
+  stopCheckoutReminderSync();
   if (!server) {
     process.exit(0);
     return;
