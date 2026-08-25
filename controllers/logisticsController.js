@@ -464,8 +464,6 @@ export async function generateWaybill(req, res) {
   }
 }
 
-}
-
 export async function createOrderShipment(req, res) {
   const orderId = idOf(req.params.orderId || req.body?.order_id || req.body?.orderId);
   if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
