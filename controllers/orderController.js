@@ -18,6 +18,11 @@ import {
 } from "../services/inventoryService.js";
 import { deriveOrderDisplayStatus } from "../services/orderDisplayStatus.js";
 import { deriveShipmentStatusDisplay } from "../services/shipmentStatusDisplay.js";
+import {
+  isCodOrder,
+  withNormalizedPaymentMode,
+} from "../services/paymentMode.js";
+import { isMissingColumnError } from "../lib/dbErrors.js";
 import { pool } from "../config/db.js";
 
 const ALLOWED_ORDER_STATUSES = [
@@ -91,14 +96,15 @@ function trimStr(value) {
 }
 
 function withDisplayStatuses(order) {
+  const normalized = withNormalizedPaymentMode(order);
   return {
-    ...order,
-    display_status: deriveOrderDisplayStatus(order),
-    shipment_status_display: deriveShipmentStatusDisplay(order),
+    ...normalized,
+    display_status: deriveOrderDisplayStatus(normalized),
+    shipment_status_display: deriveShipmentStatusDisplay(normalized),
     shipment_status_updated_at:
-      order.tracking_status_at ||
-      order.tracking_updated_at ||
-      order.shipment_created_at ||
+      normalized.tracking_status_at ||
+      normalized.tracking_updated_at ||
+      normalized.shipment_created_at ||
       null,
   };
 }
@@ -187,6 +193,90 @@ function validateCreateOrder(body) {
       payment_method,
       whatsapp_updates_consent: consent.whatsapp_updates_consent,
       whatsapp_consent_at: consent.whatsapp_consent_at,
+    },
+  };
+}
+
+function validateManualCodOrder(body) {
+  if (!body || typeof body !== "object") {
+    return { error: "Invalid JSON body" };
+  }
+
+  const customer_name = trimStr(body.customer_name);
+  const phone = trimStr(body.phone);
+  const emailRaw = trimStr(body.email);
+  const address = trimStr(body.address);
+  const city = trimStr(body.city);
+  const state = trimStr(body.state);
+  const pincode = trimStr(body.pincode);
+
+  const quantity = Number(body.quantity);
+  const unit_price = Number(body.unit_price);
+  const total_amount = Number(body.total_amount);
+
+  if (!customer_name) {
+    return { error: "customer_name is required" };
+  }
+  if (!phone) {
+    return { error: "phone is required" };
+  }
+  if (!/^\d{10}$/.test(String(phone))) {
+    return { error: "phone must contain exactly 10 digits" };
+  }
+  if (!address) {
+    return { error: "address is required" };
+  }
+  if (!city) {
+    return { error: "city is required" };
+  }
+  if (!state) {
+    return { error: "state is required" };
+  }
+  if (!pincode) {
+    return { error: "pincode is required" };
+  }
+  if (!/^\d{6}$/.test(String(pincode))) {
+    return { error: "pincode must be a valid 6-digit Indian pincode" };
+  }
+  if (body.quantity === undefined || body.quantity === null || body.quantity === "") {
+    return { error: "quantity is required" };
+  }
+  if (!Number.isFinite(quantity) || !Number.isInteger(quantity) || quantity <= 0) {
+    return { error: "quantity must be an integer greater than 0" };
+  }
+  if (body.unit_price === undefined || body.unit_price === null || body.unit_price === "") {
+    return { error: "unit_price is required" };
+  }
+  if (!Number.isFinite(unit_price) || unit_price <= 0) {
+    return { error: "unit_price must be a positive number" };
+  }
+  if (body.total_amount === undefined || body.total_amount === null || body.total_amount === "") {
+    return { error: "total_amount is required" };
+  }
+  if (!Number.isFinite(total_amount) || total_amount <= 0) {
+    return { error: "total_amount must be a positive number" };
+  }
+
+  let email = null;
+  if (emailRaw !== undefined && emailRaw !== null && emailRaw !== "") {
+    if (!isValidEmail(emailRaw)) {
+      return { error: "email must be a valid email address" };
+    }
+    email = emailRaw;
+  }
+
+  return {
+    data: {
+      customer_name,
+      phone: String(phone),
+      email,
+      address,
+      city,
+      state,
+      pincode: String(pincode),
+      quantity,
+      unit_price,
+      total_amount,
     },
   };
 }
@@ -565,6 +655,190 @@ export async function createOrder(req, res) {
   }
 }
 
+/** POST /api/orders/manual-cod — admin-only COD order. Does not touch public POST /api/orders. */
+export async function createManualCodOrder(req, res) {
+  const adminId = currentAdminId(req);
+  if (!adminId) {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized",
+    });
+  }
+
+  try {
+    const validation = validateManualCodOrder(req.body);
+    if (validation.error) {
+      return res.status(400).json({
+        success: false,
+        message: validation.error,
+      });
+    }
+
+    const orderData = validation.data;
+
+    let inserted;
+    try {
+      inserted = await query(
+        `INSERT INTO orders (
+          customer_name,
+          phone,
+          email,
+          address,
+          city,
+          state,
+          pincode,
+          quantity,
+          unit_price,
+          total_amount,
+          payment_method,
+          payment_status,
+          order_status,
+          payment_mode,
+          whatsapp_updates_consent,
+          whatsapp_consent_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'New', 'cod', 0, NULL
+        )`,
+        [
+          orderData.customer_name,
+          orderData.phone,
+          orderData.email,
+          orderData.address,
+          orderData.city,
+          orderData.state,
+          orderData.pincode,
+          orderData.quantity,
+          orderData.unit_price,
+          orderData.total_amount,
+        ]
+      );
+    } catch (error) {
+      if (isMissingColumnError(error, "payment_mode")) {
+        return res.status(503).json({
+          success: false,
+          message: "Orders table is missing payment_mode. Run node scripts/migrate-payment-mode.js",
+        });
+      }
+      throw error;
+    }
+
+    const id = inserted.insertId;
+    const orderNumber = `TAQ-${String(id).padStart(6, "0")}`;
+
+    await query(
+      `UPDATE orders
+       SET order_number = ?
+       WHERE id = ?`,
+      [orderNumber, id]
+    );
+
+    const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
+
+    return res.status(201).json({
+      success: true,
+      message: "COD order created successfully",
+      order: withDisplayStatuses(rows[0]),
+    });
+  } catch (error) {
+    console.error("Manual COD order API error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+}
+
+/** PATCH /api/orders/:id/cod-payment — Pending → Paid for COD only. */
+export async function collectCodPayment(req, res) {
+  const adminId = currentAdminId(req);
+  if (!adminId) {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized",
+    });
+  }
+
+  try {
+    const id = parseOrderId(req.params.id);
+    if (id === null) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order id",
+      });
+    }
+
+    const { rows: existing } = await query(
+      `SELECT * FROM orders WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    const order = existing[0];
+    if (!isCodOrder(order)) {
+      return res.status(409).json({
+        success: false,
+        message: "COD payment collection is not allowed for Razorpay orders",
+      });
+    }
+
+    const currentPay = String(order.payment_status || "").trim();
+    if (currentPay === "Paid") {
+      return res.status(409).json({
+        success: false,
+        message: "COD payment is already Paid",
+      });
+    }
+    if (currentPay !== "Pending") {
+      return res.status(409).json({
+        success: false,
+        message: "COD payment can only move from Pending to Paid",
+      });
+    }
+
+    const updated = await query(
+      `UPDATE orders
+       SET payment_status = 'Paid',
+           payment_date = COALESCE(payment_date, CURRENT_TIMESTAMP),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+         AND payment_mode = 'cod'
+         AND payment_status = 'Pending'`,
+      [id]
+    );
+
+    if (!updated.rowCount) {
+      return res.status(409).json({
+        success: false,
+        message: "COD payment could not be updated",
+      });
+    }
+
+    const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
+    return res.status(200).json({
+      success: true,
+      message: "COD payment marked as Paid",
+      order: withDisplayStatuses(rows[0]),
+    });
+  } catch (error) {
+    if (isMissingColumnError(error, "payment_mode")) {
+      return res.status(503).json({
+        success: false,
+        message: "Orders table is missing payment_mode. Run node scripts/migrate-payment-mode.js",
+      });
+    }
+    console.error("COD payment API error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+}
+
 /** GET /api/orders/:id */
 export async function getOrderById(req, res) {
   try {
@@ -664,11 +938,25 @@ export async function updateOrder(req, res) {
       });
     }
 
-    const { rows: existing } = await query(
-      `SELECT id, order_status, payment_status, quantity, order_number
-       FROM orders WHERE id = ?`,
-      [id]
-    );
+    let existing;
+    try {
+      const found = await query(
+        `SELECT id, order_status, payment_status, quantity, order_number,
+                payment_method, payment_mode
+         FROM orders WHERE id = ?`,
+        [id]
+      );
+      existing = found.rows;
+    } catch (error) {
+      if (!isMissingColumnError(error, "payment_mode")) throw error;
+      const found = await query(
+        `SELECT id, order_status, payment_status, quantity, order_number,
+                payment_method
+         FROM orders WHERE id = ?`,
+        [id]
+      );
+      existing = found.rows;
+    }
 
     if (existing.length === 0) {
       return res.status(404).json({
@@ -678,6 +966,24 @@ export async function updateOrder(req, res) {
     }
 
     const prior = existing[0];
+    if (
+      payment_status !== undefined &&
+      String(payment_status).toLowerCase() !==
+        String(prior.payment_status || "").toLowerCase()
+    ) {
+      if (isCodOrder(prior)) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "COD payment status can only be updated via PATCH /api/orders/:id/cod-payment",
+        });
+      }
+      return res.status(409).json({
+        success: false,
+        message: "Razorpay payment status cannot be updated manually",
+      });
+    }
+
     const nextOrderStatus = order_status ?? prior.order_status;
     const nextPaymentStatus = payment_status ?? prior.payment_status;
     const isCancelling =
@@ -722,7 +1028,7 @@ export async function updateOrder(req, res) {
       return res.status(200).json({
         success: true,
         message: "Order updated successfully",
-        order: rows[0],
+        order: withDisplayStatuses(rows[0]),
       });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => {});

@@ -26,6 +26,7 @@ import {
   mapDelhiveryStatus,
 } from "../services/logisticsState.js";
 import { isStatusEventCurrent } from "../services/delhiveryWebhookService.js";
+import { canFulfillOrder } from "../services/paymentMode.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -489,7 +490,7 @@ export async function createOrderShipment(req, res) {
     const found = await client.query("SELECT * FROM orders WHERE id=? LIMIT 1 FOR UPDATE", [orderId]);
     order = found.rows[0];
     if (!order) { await client.query("ROLLBACK"); return res.status(404).json({ success: false, message: "Order not found." }); }
-    if (String(order.payment_status).toLowerCase() !== "paid") { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Only paid orders can be fulfilled." }); }
+    if (!canFulfillOrder(order)) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Only paid prepaid orders, or COD orders that are Pending or Paid, can be fulfilled." }); }
     shipment = await shipmentForOrder(orderId, client, true) || await ensureShipment(orderId, client);
     assertShipmentEnvironment(shipment);
     if (shipment.shipment_created_at || shipment.shipment_id) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "Shipment already exists for this order.", shipment }); }

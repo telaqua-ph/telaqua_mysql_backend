@@ -16,6 +16,7 @@
     "migrate:inventory": "node scripts/migrate-inventory.js",
     "migrate:order-views": "node scripts/migrate-order-views.js",
     "migrate:delhivery": "node scripts/migrate-delhivery-logistics.js",
+    "migrate:payment-mode": "node scripts/migrate-payment-mode.js",
     "test": "node --test --test-isolation=none"
   },
   "dependencies": {
