@@ -35,6 +35,7 @@ function mapStatsRow(row, from, to) {
     newOrders: Number(row.new_orders || 0),
     paidOrders: Number(row.paid_orders || 0),
     pendingPayments: Number(row.pending_payments || 0),
+    codOrders: Number(row.cod_orders || 0),
     shipmentsCreated: Number(row.shipments_created || 0),
     unseenOrders: Number(row.unseen_orders || 0),
     devicesSold: Number(row.devices_sold || 0),
@@ -125,6 +126,33 @@ function shipmentPredicate(columns, alias = "", includeShipmentsTable = false) {
   return parts.length ? parts.join("\n            OR ") : "FALSE";
 }
 
+/**
+ * Same rule as services/paymentMode.js isCodOrder:
+ * payment_mode = cod, or legacy payment_method when mode is not razorpay.
+ */
+function codOrderPredicate(columns, alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  const hasMode = columns.has("payment_mode");
+  const hasMethod = columns.has("payment_method");
+
+  if (hasMode && hasMethod) {
+    return `(
+            LOWER(TRIM(COALESCE(${prefix}payment_mode, ''))) = 'cod'
+            OR (
+              LOWER(TRIM(COALESCE(${prefix}payment_mode, ''))) NOT IN ('cod', 'razorpay')
+              AND LOWER(TRIM(COALESCE(${prefix}payment_method, ''))) IN ('cod', 'cash on delivery', 'cash_on_delivery')
+            )
+          )`;
+  }
+  if (hasMode) {
+    return `LOWER(TRIM(COALESCE(${prefix}payment_mode, ''))) = 'cod'`;
+  }
+  if (hasMethod) {
+    return `LOWER(TRIM(COALESCE(${prefix}payment_method, ''))) IN ('cod', 'cash on delivery', 'cash_on_delivery')`;
+  }
+  return "FALSE";
+}
+
 function paidDateExpression(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
   if (columns.has("payment_date") && columns.has("created_at")) {
@@ -157,6 +185,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const revenueExpr = revenueExpression(columns);
   const paidDateExpr = paidDateExpression(columns);
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
+  const codExpr = codOrderPredicate(columns);
   const quantityExpr = columns.has("quantity") ? "quantity" : "0";
   const orderStatusExpr = columns.has("order_status")
     ? "COALESCE(order_status, '')"
@@ -184,6 +213,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN LOWER(${orderStatusExpr}) IN ('new', 'pending') THEN 1 ELSE 0 END) AS SIGNED) AS new_orders,
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Paid' THEN 1 ELSE 0 END) AS SIGNED) AS paid_orders,
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Pending' THEN 1 ELSE 0 END) AS SIGNED) AS pending_payments,
+         CAST(SUM(CASE WHEN ${codExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_orders,
          CAST(SUM(CASE WHEN ${shipmentExpr} THEN 1 ELSE 0 END) AS SIGNED) AS shipments_created,
          CAST(SUM(CASE WHEN ${unseenPredicate} THEN 1 ELSE 0 END) AS SIGNED) AS unseen_orders
        FROM order_rows o
@@ -289,6 +319,7 @@ export async function getStats(req, res) {
         newOrders: 0,
         paidOrders: 0,
         pendingPayments: 0,
+        codOrders: 0,
         shipmentsCreated: 0,
         unseenOrders: 0,
         devicesSold: 0,
