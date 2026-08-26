@@ -791,7 +791,7 @@ export async function createManualCodOrder(req, res) {
           whatsapp_updates_consent,
           whatsapp_consent_at
         ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'New', 'cod', 0, NULL
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod', 0, NULL
         )`,
         [
           orderData.customer_name,
@@ -957,7 +957,7 @@ export async function createWebsiteCodOrder(req, res) {
           whatsapp_consent_at
         ) VALUES (
           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-          'cod', 'Pending', 'New', 'cod',
+          'cod', 'Pending', 'Confirmed', 'cod',
           ?, ?, ?, ?, ?, ?, ?, ?, ?,
           'not_created', ?, ?
         )`,
@@ -1014,7 +1014,7 @@ export async function createWebsiteCodOrder(req, res) {
             whatsapp_updates_consent,
             whatsapp_consent_at
           ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'New', 'cod', ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod', ?, ?
           )`,
           [
             orderData.customer_name,
