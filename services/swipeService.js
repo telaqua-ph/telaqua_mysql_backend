@@ -143,9 +143,13 @@ export async function createSwipeInvoiceForOrder(order, payload) {
       Array.isArray(workingPayload.payments)
     ) {
       delete workingPayload.payments;
+      const paymentNote = String(order?.payment_mode || "").trim().toLowerCase() === "cod" ||
+        /^(cod|cash on delivery|cash_on_delivery)$/i.test(String(order?.payment_method || "").trim())
+        ? "Payment: COD"
+        : `Paid via Razorpay: ${order.razorpay_payment_id}`;
       workingPayload.notes = [
         workingPayload.notes,
-        `Paid via Razorpay: ${order.razorpay_payment_id}`,
+        paymentNote,
       ].filter(Boolean).join("; ");
       corrected = true;
       console.warn("[Invoice] Swipe has no bank details; omitting payment record", {

@@ -218,3 +218,46 @@ test("payment_mode razorpay wins over a COD payment_method for invoice eligibili
     false
   );
 });
+
+test("COD Swipe payload is a GST invoice without Razorpay payment fields", () => {
+  const payload = buildSwipePayload(order({
+    payment_mode: "cod",
+    payment_method: "cod",
+    payment_status: "Pending",
+    razorpay_payment_id: null,
+  }));
+  assert.equal(payload.document_type, "invoice");
+  assert.equal(payload.items[0].hsn_code, "90314900");
+  assert.equal(payload.items[0].tax_rate, 18);
+  assert.equal(payload.payments, undefined);
+  assert.match(payload.reference, /TAQ-001058/);
+  assert.match(payload.reference, /Payment: COD/);
+  assert.doesNotMatch(payload.reference, /Razorpay/);
+});
+
+test("Paid COD records cash, not a Razorpay payment id", () => {
+  const payload = buildSwipePayload(order({
+    payment_mode: "cod",
+    payment_method: "cod",
+    payment_status: "Paid",
+    razorpay_payment_id: "",
+  }));
+  assert.equal(payload.payments[0].method, "cash");
+  assert.equal(payload.payments[0].notes, "COD");
+  assert.equal(payload.payments[0].amount, 2124);
+  assert.match(payload.reference, /Payment: COD/);
+});
+
+test("COD with a missing taxable snapshot is repaired from the order total", () => {
+  const payload = buildSwipePayload(order({
+    payment_mode: "cod",
+    payment_method: "cod",
+    payment_status: "Pending",
+    taxable_amount: 0,
+    gst_amount: 0,
+    shipping_amount: 0,
+    razorpay_payment_id: null,
+  }));
+  assert.equal(payload.items[0].total_amount, 2124);
+  assert.equal(payload.payments, undefined);
+});

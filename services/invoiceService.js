@@ -117,10 +117,21 @@ function getFinancialSnapshot(order) {
   const finalTotal = round2(order.final_total ?? order.total_amount);
   const shipping = round2(order.shipping_amount || 0);
   const rate = round2(order.gst_rate ?? 18);
-  const taxable = round2(
+  let taxable = round2(
     order.taxable_amount ?? (finalTotal - shipping) / (1 + rate / 100)
   );
-  const gst = round2(order.gst_amount ?? finalTotal - shipping - taxable);
+  let gst = round2(order.gst_amount ?? finalTotal - shipping - taxable);
+
+  /* COD fallback INSERT can leave taxable/gst as 0 while total is set. Razorpay snapshots stay as stored. */
+  if (
+    isCodOrder(order) &&
+    finalTotal > 0 &&
+    round2(taxable + gst + shipping) !== finalTotal
+  ) {
+    taxable = round2((finalTotal - shipping) / (1 + rate / 100));
+    gst = round2(finalTotal - shipping - taxable);
+  }
+
   const productTotal = round2(taxable + gst);
 
   if (
@@ -185,25 +196,40 @@ export function buildSwipePayload(order) {
     });
   }
 
-  return {
+  const couponNote = order.promo_code
+    ? `Coupon ${order.promo_code}; discount Rs ${round2(order.discount_amount || 0)}`
+    : undefined;
+  const payload = {
     document_type: "invoice",
     document_date: formatDate(order.payment_date || new Date()),
     party: buildParty(order),
     items,
-    payments: [{
-      amount: money.finalTotal,
-      method: mapPaymentMethod(order.payment_method),
-      notes: String(order.razorpay_payment_id || ""),
-    }],
-    reference: `Website Order: ${order.order_number || order.id}; Razorpay Payment: ${order.razorpay_payment_id}`,
-    notes: order.promo_code
-      ? `Coupon ${order.promo_code}; discount Rs ${round2(order.discount_amount || 0)}`
-      : undefined,
+    notes: couponNote,
     // Swipe uses the order snapshot contact data for dashboard-configured email/
     // WhatsApp automation. send_wtsp is enabled only with explicit site consent.
     send_wtsp: Boolean(order.whatsapp_updates_consent && !order.is_test_order),
     send_sms: false,
   };
+
+  if (isCodOrder(order)) {
+    payload.reference = `Website Order: ${order.order_number || order.id}; Payment: COD`;
+    if (String(order.payment_status || "").trim() === "Paid") {
+      payload.payments = [{
+        amount: money.finalTotal,
+        method: "cash",
+        notes: "COD",
+      }];
+    }
+    return payload;
+  }
+
+  payload.payments = [{
+    amount: money.finalTotal,
+    method: mapPaymentMethod(order.payment_method),
+    notes: String(order.razorpay_payment_id || ""),
+  }];
+  payload.reference = `Website Order: ${order.order_number || order.id}; Razorpay Payment: ${order.razorpay_payment_id}`;
+  return payload;
 }
 
 function existingInvoice(order) {

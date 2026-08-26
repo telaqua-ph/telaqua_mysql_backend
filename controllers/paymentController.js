@@ -439,6 +439,24 @@ function hasCodOrderNumberAccess(order, suppliedOrderNumber) {
     crypto.timingSafeEqual(left, right);
 }
 
+async function attachInvoiceAccessHash(order) {
+  if (!order?.id) return order;
+  if (order.invoice_access_token_hash) return order;
+  try {
+    const { rows } = await query(
+      `SELECT invoice_access_token_hash FROM orders WHERE id = ? LIMIT 1`,
+      [order.id]
+    );
+    return {
+      ...order,
+      invoice_access_token_hash: rows[0]?.invoice_access_token_hash || "",
+    };
+  } catch (error) {
+    if (isMissingColumnError(error, "invoice_access_token_hash")) return order;
+    throw error;
+  }
+}
+
 function buildVerifySuccessResponse(order, message) {
   const isTest = Boolean(order.is_test_order);
   return {
@@ -473,11 +491,12 @@ function validateInvoiceStatusPayload(body) {
   const order_id = parsePositiveOrderId(body.order_id);
   const invoice_access_token = trimStr(body.invoice_access_token);
   const razorpay_payment_id = trimStr(body.razorpay_payment_id);
+  const order_number = trimStr(body.order_number);
 
   if (!order_id) {
     return { error: "order_id must be a positive integer" };
   }
-  if (!invoice_access_token && !razorpay_payment_id) {
+  if (!invoice_access_token && !razorpay_payment_id && !order_number) {
     return { error: "invoice_access_token or razorpay_payment_id is required" };
   }
 
@@ -486,6 +505,7 @@ function validateInvoiceStatusPayload(body) {
       order_id,
       invoice_access_token: invoice_access_token ? String(invoice_access_token) : null,
       razorpay_payment_id: razorpay_payment_id ? String(razorpay_payment_id) : null,
+      order_number: order_number || null,
     },
   };
 }
@@ -501,7 +521,7 @@ export async function getInvoiceStatus(req, res) {
       });
     }
 
-    const { order_id, invoice_access_token, razorpay_payment_id } = validation.data;
+    const { order_id, invoice_access_token, razorpay_payment_id, order_number } = validation.data;
     let order = await loadOrderForFulfillment(order_id);
 
     if (!order) {
@@ -511,7 +531,12 @@ export async function getInvoiceStatus(req, res) {
       });
     }
 
-    if (!hasCustomerInvoiceAccess(order, invoice_access_token, razorpay_payment_id)) {
+    order = await attachInvoiceAccessHash(order);
+
+    if (
+      !hasCustomerInvoiceAccess(order, invoice_access_token, razorpay_payment_id) &&
+      !hasCodOrderNumberAccess(order, order_number)
+    ) {
       return res.status(403).json({
         success: false,
         message: "You are not allowed to access this order",
@@ -527,14 +552,15 @@ export async function getInvoiceStatus(req, res) {
 
     const paid = String(order.payment_status || "").trim() === "Paid";
     if (!paid && isCodOrder(order)) {
-      if (invoiceAlreadyGenerated(order)) {
+      const codDownloadUrl = () => buildCustomerInvoiceUrl(
+        req, order.id, invoice_access_token, razorpay_payment_id, order_number
+      );
+      if (order.swipe_invoice_id) {
         return res.status(200).json({
           success: true,
           invoice_ready: true,
           invoice_number: order.invoice_number || order.order_number,
-          invoice_url: buildCustomerInvoiceUrl(
-            req, order.id, invoice_access_token, razorpay_payment_id
-          ),
+          invoice_url: codDownloadUrl(),
           invoice_generated_at: order.invoice_generated_at,
         });
       }
@@ -544,15 +570,23 @@ export async function getInvoiceStatus(req, res) {
       } catch {
         order = await loadOrderForFulfillment(order.id);
       }
-      if (invoiceAlreadyGenerated(order) || order?.swipe_invoice_id) {
+      if (order?.swipe_invoice_id) {
         return res.status(200).json({
           success: true,
           invoice_ready: true,
           invoice_number: order.invoice_number || order.order_number,
-          invoice_url: buildCustomerInvoiceUrl(
-            req, order.id, invoice_access_token, razorpay_payment_id
-          ),
+          invoice_url: codDownloadUrl(),
           invoice_generated_at: order.invoice_generated_at,
+        });
+      }
+      if (hasSwipeQuotaFailure(order)) {
+        return res.status(200).json({
+          success: true,
+          invoice_ready: true,
+          invoice_status: "fallback_generated",
+          invoice_number: order.invoice_number || order.order_number,
+          invoice_url: codDownloadUrl(),
+          message: "A paid-order invoice copy is ready for download.",
         });
       }
       return res.status(202).json({
@@ -645,10 +679,11 @@ function requestOrigin(req) {
   return `${protocol}://${req.get("host")}`;
 }
 
-function buildCustomerInvoiceUrl(req, orderId, invoiceAccessToken, razorpayPaymentId) {
+function buildCustomerInvoiceUrl(req, orderId, invoiceAccessToken, razorpayPaymentId, orderNumber) {
   const query = new URLSearchParams({ order_id: String(orderId) });
   if (invoiceAccessToken) query.set("invoice_access_token", invoiceAccessToken);
-  else query.set("razorpay_payment_id", razorpayPaymentId);
+  else if (razorpayPaymentId) query.set("razorpay_payment_id", razorpayPaymentId);
+  else if (orderNumber) query.set("order_number", orderNumber);
   return `${requestOrigin(req)}/api/payment/invoice-download?${query.toString()}`;
 }
 
@@ -704,6 +739,7 @@ export async function downloadCustomerInvoice(req, res) {
         message: "Order not found",
       });
     }
+    order = await attachInvoiceAccessHash(order);
     if (
       authenticatedCustomer &&
       !orderBelongsToCustomer(order, authenticatedCustomer.phone)

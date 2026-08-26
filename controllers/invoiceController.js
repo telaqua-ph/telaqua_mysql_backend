@@ -5,6 +5,7 @@
  */
 
 import {
+  ensureSwipeInvoiceForPaidOrder,
   getOrderInvoicePdfByOrderId,
   processOrderFulfillment,
   refreshSwipeInvoiceHsn,
@@ -78,6 +79,17 @@ export async function downloadOrderInvoice(req, res) {
         success: false,
         message: "Invalid order id",
       });
+    }
+
+    try {
+      await ensureSwipeInvoiceForPaidOrder(orderId);
+    } catch (error) {
+      if (error?.statusCode === 404) {
+        return res.status(404).json({
+          success: false,
+          message: error.message || "Order not found",
+        });
+      }
     }
 
     const pdf = await getOrderInvoicePdfByOrderId(orderId);
