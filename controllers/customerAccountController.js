@@ -94,7 +94,7 @@ function safeOrder(order, req, detailed = false, shipment = null) {
   const merged = mergeShipmentFields(order, shipment);
   const paid = String(merged.payment_status || "").toLowerCase() === "paid";
   const invoiceAvailable = paid || Boolean(merged.swipe_invoice_id) ||
-    String(merged.invoice_status || "").toLowerCase() === "generated";
+    ["generated", "fallback_generated"].includes(String(merged.invoice_status || "").toLowerCase());
   const result = {
     id: merged.id,
     order_number: merged.order_number,

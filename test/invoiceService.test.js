@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildSwipePayload } from "../services/invoiceService.js";
+import { buildSwipePayload, canGenerateOrderInvoice } from "../services/invoiceService.js";
 import {
   createSwipeInvoiceForOrder,
   getSwipeInvoicePdf,
@@ -172,4 +172,49 @@ test("paid-order fallback PDF contains a valid PDF header and HSN", async () => 
   assert.equal(pdf.buffer.subarray(0, 5).toString("ascii"), "%PDF-");
   assert.ok(pdf.buffer.length > 1000);
   assert.equal(pdf.source, "local_fallback");
+});
+
+test("COD Pending and Paid orders may generate an invoice", () => {
+  assert.equal(
+    canGenerateOrderInvoice({ payment_mode: "cod", payment_status: "Pending" }),
+    true
+  );
+  assert.equal(
+    canGenerateOrderInvoice({ payment_method: "cod", payment_status: "Pending" }),
+    true
+  );
+  assert.equal(
+    canGenerateOrderInvoice({ payment_mode: "cod", payment_status: "Paid" }),
+    true
+  );
+});
+
+test("Paid Razorpay may generate an invoice; unpaid Razorpay is blocked", () => {
+  assert.equal(
+    canGenerateOrderInvoice({ payment_mode: "razorpay", payment_status: "Paid" }),
+    true
+  );
+  assert.equal(
+    canGenerateOrderInvoice({ payment_mode: "razorpay", payment_status: "Pending" }),
+    false
+  );
+  assert.equal(
+    canGenerateOrderInvoice({ payment_mode: "razorpay", payment_status: "Failed" }),
+    false
+  );
+  assert.equal(
+    canGenerateOrderInvoice({ payment_method: "upi", payment_status: "Pending" }),
+    false
+  );
+});
+
+test("payment_mode razorpay wins over a COD payment_method for invoice eligibility", () => {
+  assert.equal(
+    canGenerateOrderInvoice({
+      payment_mode: "razorpay",
+      payment_method: "cod",
+      payment_status: "Pending",
+    }),
+    false
+  );
 });

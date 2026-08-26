@@ -6,6 +6,7 @@
 import crypto from "node:crypto";
 import { query } from "../config/db.js";
 import { normalizeIndianPhone } from "../utils/phoneUtils.js";
+import { isCodOrder } from "./paymentMode.js";
 import { generateLocalInvoicePdf } from "./localInvoicePdfService.js";
 import {
   createSwipeInvoiceForOrder,
@@ -14,10 +15,36 @@ import {
   updateSwipeInvoiceForOrder,
 } from "./swipeService.js";
 
+/** Paid orders, or COD (including Pending). Never unpaid Razorpay. */
+export function canGenerateOrderInvoice(order) {
+  if (!order) return false;
+  if (String(order.payment_status || "").trim() === "Paid") return true;
+  return isCodOrder(order);
+}
+
+export function invoiceAlreadyGenerated(order) {
+  const status = String(order?.invoice_status || "").toLowerCase();
+  return Boolean(order?.swipe_invoice_id) ||
+    status === "generated" ||
+    status === "fallback_generated" ||
+    (Boolean(String(order?.invoice_url || "").trim()) && Boolean(order?.invoice_number));
+}
+
+const INVOICE_CLAIM_ELIGIBLE_SQL = `
+  (
+    payment_status = 'Paid'
+    OR LOWER(TRIM(COALESCE(payment_mode, ''))) = 'cod'
+    OR (
+      LOWER(TRIM(COALESCE(payment_mode, ''))) NOT IN ('cod', 'razorpay')
+      AND LOWER(TRIM(COALESCE(payment_method, ''))) IN ('cod', 'cash on delivery', 'cash_on_delivery')
+    )
+  )
+`;
+
 const ORDER_SELECT = `
   SELECT
     id, customer_name, phone, email, address, city, state, pincode,
-    quantity, unit_price, total_amount, payment_method, payment_status,
+    quantity, unit_price, total_amount, payment_method, payment_mode, payment_status,
     order_status, order_number, razorpay_order_id, razorpay_payment_id,
     payment_date, promo_code, original_amount, discount_amount,
     COALESCE(is_test_order, 0) AS is_test_order,
@@ -114,6 +141,9 @@ function mapPaymentMethod(value) {
     upi: "upi", card: "card", netbanking: "netBanking", emi: "emi",
     cash: "cash", cheque: "cheque", wallet: "upi", paylater: "emi",
     razorpay: "upi",
+    cod: "cash",
+    "cash on delivery": "cash",
+    cash_on_delivery: "cash",
   }[method] || "upi";
 }
 
@@ -194,7 +224,8 @@ async function claimInvoiceCreation(orderId) {
      SET invoice_status = 'pending', invoice_attempt_token = ?,
          invoice_processing_started_at = CURRENT_TIMESTAMP,
          swipe_invoice_error = NULL, updated_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND payment_status = 'Paid' AND swipe_invoice_id IS NULL
+     WHERE id = ? AND swipe_invoice_id IS NULL
+       AND ${INVOICE_CLAIM_ELIGIBLE_SQL}
        AND (
          invoice_status IS NULL
          OR LOWER(invoice_status) IN ('not_created', 'not created', 'failed')
@@ -216,12 +247,14 @@ export async function ensureSwipeInvoiceForPaidOrder(orderId) {
     error.statusCode = 404;
     throw error;
   }
-  if (String(order.payment_status).trim() !== "Paid") {
+  if (!canGenerateOrderInvoice(order)) {
     const error = new Error("Order payment is not completed");
     error.statusCode = 400;
     throw error;
   }
-  console.log(`[Invoice] Order is PAID: ${order.order_number || order.id}`);
+  console.log(
+    `[Invoice] Order eligible: ${order.order_number || order.id} (${order.payment_status || "unknown"}/${isCodOrder(order) ? "cod" : "prepaid"})`
+  );
   if (order.swipe_invoice_id) {
     if (String(order.invoice_status || "").toLowerCase() !== "generated") {
       await query(
@@ -319,7 +352,7 @@ export async function getOrderInvoicePdfByOrderId(orderId) {
     error.statusCode = 404;
     throw error;
   }
-  if (String(order.payment_status).trim() !== "Paid") {
+  if (!canGenerateOrderInvoice(order)) {
     const error = new Error("Invoice is not available for this order yet");
     error.statusCode = 404;
     throw error;
@@ -334,7 +367,15 @@ export async function getOrderInvoicePdfByOrderId(orderId) {
       });
     }
   }
-  return generateLocalInvoicePdf(order);
+  if (
+    String(order.payment_status || "").trim() === "Paid" ||
+    invoiceAlreadyGenerated(order)
+  ) {
+    return generateLocalInvoicePdf(order);
+  }
+  const notReady = new Error("Invoice is currently being generated. Please try again shortly.");
+  notReady.statusCode = 404;
+  throw notReady;
 }
 
 export async function refreshSwipeInvoiceHsn(orderId) {
@@ -344,7 +385,7 @@ export async function refreshSwipeInvoiceHsn(orderId) {
     error.statusCode = 404;
     throw error;
   }
-  if (String(order.payment_status).trim() !== "Paid") {
+  if (!canGenerateOrderInvoice(order)) {
     const error = new Error("Order payment is not completed");
     error.statusCode = 400;
     throw error;

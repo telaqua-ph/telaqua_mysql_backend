@@ -11,7 +11,7 @@ import {
   ensureWhatsappConsentColumns,
   parseWhatsappConsent,
 } from "../services/whatsappConsent.js";
-import { logPaymentEvent, reconcileRazorpayOrder } from "../services/confirmRazorpayPayment.js";
+import { logPaymentEvent, reconcileRazorpayOrder, triggerOrderFulfillmentAsync } from "../services/confirmRazorpayPayment.js";
 import {
   assertStockAvailable,
   dispatchInventoryAlertEmails,
@@ -828,6 +828,8 @@ export async function createManualCodOrder(req, res) {
 
     const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
 
+    triggerOrderFulfillmentAsync(id);
+
     return res.status(201).json({
       success: true,
       message: "COD order created successfully",
@@ -1045,6 +1047,8 @@ export async function createWebsiteCodOrder(req, res) {
     );
 
     const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
+
+    triggerOrderFulfillmentAsync(id);
 
     return res.status(201).json({
       success: true,

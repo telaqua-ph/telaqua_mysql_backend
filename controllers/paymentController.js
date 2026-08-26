@@ -29,10 +29,13 @@ import {
 } from "../services/whatsappConsent.js";
 import { assertStockAvailable } from "../services/inventoryService.js";
 import {
+  canGenerateOrderInvoice,
   ensureSwipeInvoiceForPaidOrder,
   getOrderInvoicePdfByOrderId,
+  invoiceAlreadyGenerated,
   loadOrderForFulfillment,
 } from "../services/invoiceService.js";
+import { isCodOrder } from "../services/paymentMode.js";
 import {
   authenticateCustomerRequest,
   getBearerToken,
@@ -651,13 +654,24 @@ export async function downloadCustomerInvoice(req, res) {
         message: "You are not allowed to access this order",
       });
     }
-    if (String(order.payment_status || "").trim() !== "Paid") {
+    if (!canGenerateOrderInvoice(order)) {
       return res.status(400).json({
         success: false,
         message: "Invoice is available only for paid orders",
       });
     }
-    if (!order.swipe_invoice_id && !hasSwipeQuotaFailure(order)) {
+
+    const paid = String(order.payment_status || "").trim() === "Paid";
+    if (!paid && isCodOrder(order) && !invoiceAlreadyGenerated(order)) {
+      return res.status(202).json({
+        success: true,
+        invoice_ready: false,
+        invoice_status: String(order.invoice_status || "pending").toLowerCase(),
+        message: "Invoice is currently being generated. Please try again shortly.",
+      });
+    }
+
+    if (paid && !order.swipe_invoice_id && !hasSwipeQuotaFailure(order)) {
       try {
         const invoice = await ensureSwipeInvoiceForPaidOrder(order.id);
         order = await loadOrderForFulfillment(order.id);
