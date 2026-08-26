@@ -346,7 +346,7 @@ export async function ensureSwipeInvoiceForPaidOrder(orderId) {
 }
 
 export async function getOrderInvoicePdfByOrderId(orderId) {
-  const order = await loadOrderForFulfillment(orderId);
+  let order = await loadOrderForFulfillment(orderId);
   if (!order) {
     const error = new Error("Order not found");
     error.statusCode = 404;
@@ -367,15 +367,56 @@ export async function getOrderInvoicePdfByOrderId(orderId) {
       });
     }
   }
-  if (
-    String(order.payment_status || "").trim() === "Paid" ||
-    invoiceAlreadyGenerated(order)
-  ) {
-    return generateLocalInvoicePdf(order);
+
+  const status = String(order.invoice_status || "").toLowerCase();
+  const startedAt = order.invoice_processing_started_at
+    ? new Date(order.invoice_processing_started_at).getTime()
+    : 0;
+  const inFlight =
+    status === "pending" &&
+    Number.isFinite(startedAt) &&
+    startedAt > 0 &&
+    Date.now() - startedAt < 5 * 60 * 1000;
+  if (inFlight && !invoiceAlreadyGenerated(order) && !order.swipe_invoice_id) {
+    const notReady = new Error("Invoice is currently being generated. Please try again shortly.");
+    notReady.statusCode = 404;
+    throw notReady;
   }
-  const notReady = new Error("Invoice is currently being generated. Please try again shortly.");
-  notReady.statusCode = 404;
-  throw notReady;
+
+  order = (await persistFallbackInvoice(order)) || order;
+  return generateLocalInvoicePdf(order);
+}
+
+async function persistFallbackInvoice(order) {
+  if (!order?.id || !canGenerateOrderInvoice(order)) return order;
+  const invoiceNumber =
+    order.invoice_number ||
+    order.order_number ||
+    `TAQ-${String(order.id).padStart(6, "0")}`;
+  const invoiceUrl =
+    order.invoice_url || `/api/orders/${order.id}/invoice/download`;
+  const nextStatus = order.swipe_invoice_id ? "generated" : "fallback_generated";
+  try {
+    await query(
+      `UPDATE orders
+       SET invoice_number = COALESCE(NULLIF(invoice_number, ''), ?),
+           invoice_url = COALESCE(NULLIF(invoice_url, ''), ?),
+           invoice_generated_at = COALESCE(invoice_generated_at, CURRENT_TIMESTAMP),
+           invoice_status = ?,
+           invoice_attempt_token = NULL,
+           invoice_processing_started_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [invoiceNumber, invoiceUrl, nextStatus, order.id]
+    );
+  } catch (error) {
+    console.warn("[Invoice] Could not persist fallback invoice row", {
+      orderId: order.id,
+      message: error?.message || String(error),
+    });
+    return order;
+  }
+  return (await loadOrderForFulfillment(order.id)) || order;
 }
 
 export async function refreshSwipeInvoiceHsn(orderId) {

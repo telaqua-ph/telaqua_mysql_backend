@@ -20,7 +20,7 @@ import {
   dispatchInventoryAlertEmails,
   restoreStockForCancellation,
 } from "../services/inventoryService.js";
-import { normalizePaymentMode } from "../services/paymentMode.js";
+import { normalizePaymentMode, isCodOrder } from "../services/paymentMode.js";
 import { isCustomerCodCancellable, evaluateCustomerCodCancel } from "../services/customerCodCancel.js";
 
 const OTP_EXPIRY_MINUTES = 5;
@@ -93,7 +93,7 @@ function mergeShipmentFields(order, shipment = null) {
 function safeOrder(order, req, detailed = false, shipment = null) {
   const merged = mergeShipmentFields(order, shipment);
   const paid = String(merged.payment_status || "").toLowerCase() === "paid";
-  const invoiceAvailable = paid || Boolean(merged.swipe_invoice_id) ||
+  const invoiceAvailable = paid || isCodOrder(merged) || Boolean(merged.swipe_invoice_id) ||
     ["generated", "fallback_generated"].includes(String(merged.invoice_status || "").toLowerCase());
   const result = {
     id: merged.id,

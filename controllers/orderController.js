@@ -30,6 +30,7 @@ import {
 } from "../services/paymentMode.js";
 import { isMissingColumnError } from "../lib/dbErrors.js";
 import { pool } from "../config/db.js";
+import crypto from "node:crypto";
 
 const ALLOWED_ORDER_STATUSES = [
   "New",
@@ -41,6 +42,12 @@ const ALLOWED_ORDER_STATUSES = [
 ];
 
 const ALLOWED_PAYMENT_STATUSES = ["Pending", "Paid", "Failed", "Refunded"];
+
+function createInvoiceAccessToken() {
+  const token = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  return { token, hash };
+}
 
 async function attachLatestShipments(orders) {
   if (!orders.length) return orders;
@@ -1038,13 +1045,29 @@ export async function createWebsiteCodOrder(req, res) {
 
     const id = inserted.insertId;
     const orderNumber = `TAQ-${String(id).padStart(6, "0")}`;
+    const invoiceAccess = createInvoiceAccessToken();
+    let invoiceAccessToken = null;
 
-    await query(
-      `UPDATE orders
-       SET order_number = ?
-       WHERE id = ?`,
-      [orderNumber, id]
-    );
+    try {
+      await query(
+        `UPDATE orders
+         SET order_number = ?, invoice_access_token_hash = ?
+         WHERE id = ?`,
+        [orderNumber, invoiceAccess.hash, id]
+      );
+      invoiceAccessToken = invoiceAccess.token;
+    } catch (error) {
+      if (isMissingColumnError(error, "invoice_access_token_hash")) {
+        await query(
+          `UPDATE orders
+           SET order_number = ?
+           WHERE id = ?`,
+          [orderNumber, id]
+        );
+      } else {
+        throw error;
+      }
+    }
 
     const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
 
@@ -1058,6 +1081,7 @@ export async function createWebsiteCodOrder(req, res) {
       payment_mode: "cod",
       payment_status: "Pending",
       total_amount: financial.finalTotal,
+      invoice_access_token: invoiceAccessToken,
       order: withDisplayStatuses(rows[0]),
     });
   } catch (error) {

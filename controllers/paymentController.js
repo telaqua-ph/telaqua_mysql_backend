@@ -495,10 +495,48 @@ export async function getInvoiceStatus(req, res) {
       });
     }
 
-    if (String(order.payment_status || "").trim() !== "Paid") {
+    if (!canGenerateOrderInvoice(order)) {
       return res.status(400).json({
         success: false,
         message: "Invoice is available only for paid orders",
+      });
+    }
+
+    const paid = String(order.payment_status || "").trim() === "Paid";
+    if (!paid && isCodOrder(order)) {
+      if (invoiceAlreadyGenerated(order)) {
+        return res.status(200).json({
+          success: true,
+          invoice_ready: true,
+          invoice_number: order.invoice_number || order.order_number,
+          invoice_url: buildCustomerInvoiceUrl(
+            req, order.id, invoice_access_token, razorpay_payment_id
+          ),
+          invoice_generated_at: order.invoice_generated_at,
+        });
+      }
+      try {
+        await ensureSwipeInvoiceForPaidOrder(order.id);
+        order = await loadOrderForFulfillment(order.id);
+      } catch {
+        order = await loadOrderForFulfillment(order.id);
+      }
+      if (invoiceAlreadyGenerated(order) || order?.swipe_invoice_id) {
+        return res.status(200).json({
+          success: true,
+          invoice_ready: true,
+          invoice_number: order.invoice_number || order.order_number,
+          invoice_url: buildCustomerInvoiceUrl(
+            req, order.id, invoice_access_token, razorpay_payment_id
+          ),
+          invoice_generated_at: order.invoice_generated_at,
+        });
+      }
+      return res.status(202).json({
+        success: true,
+        invoice_ready: false,
+        invoice_status: String(order?.invoice_status || "pending").toLowerCase(),
+        message: "Invoice is being generated",
       });
     }
 
@@ -662,20 +700,15 @@ export async function downloadCustomerInvoice(req, res) {
     }
 
     const paid = String(order.payment_status || "").trim() === "Paid";
-    if (!paid && isCodOrder(order) && !invoiceAlreadyGenerated(order)) {
-      return res.status(202).json({
-        success: true,
-        invoice_ready: false,
-        invoice_status: String(order.invoice_status || "pending").toLowerCase(),
-        message: "Invoice is currently being generated. Please try again shortly.",
-      });
-    }
-
-    if (paid && !order.swipe_invoice_id && !hasSwipeQuotaFailure(order)) {
+    if (!invoiceAlreadyGenerated(order) && (paid || isCodOrder(order))) {
       try {
         const invoice = await ensureSwipeInvoiceForPaidOrder(order.id);
         order = await loadOrderForFulfillment(order.id);
-        if (invoice.pending && !order?.swipe_invoice_id) {
+        if (
+          invoice.pending &&
+          !order?.swipe_invoice_id &&
+          !invoiceAlreadyGenerated(order)
+        ) {
           return res.status(202).json({
             success: true,
             invoice_ready: false,
@@ -703,6 +736,13 @@ export async function downloadCustomerInvoice(req, res) {
     console.error("Payment invoice-download error:", error?.message || error);
     const status = error?.statusCode || 500;
     if (status === 404) {
+      if (/being generated/i.test(String(error.message || ""))) {
+        return res.status(202).json({
+          success: true,
+          invoice_ready: false,
+          message: error.message,
+        });
+      }
       return res.status(404).json({
         success: false,
         message: error.message || "Invoice not found",
