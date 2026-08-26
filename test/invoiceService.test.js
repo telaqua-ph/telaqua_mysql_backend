@@ -1,11 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import zlib from "node:zlib";
 import { buildSwipePayload, canGenerateOrderInvoice } from "../services/invoiceService.js";
 import {
   createSwipeInvoiceForOrder,
   getSwipeInvoicePdf,
 } from "../services/swipeService.js";
 import { generateLocalInvoicePdf } from "../services/localInvoicePdfService.js";
+
+function inflatePdfStream(buffer) {
+  const raw = buffer.toString("latin1");
+  const match = raw.match(/stream\r?\n([\s\S]*?)\r?\nendstream/);
+  if (!match) return raw;
+  return zlib.inflateSync(Buffer.from(match[1], "latin1")).toString("latin1");
+}
+
+function pdfVisibleText(buffer) {
+  const stream = inflatePdfStream(buffer);
+  const parts = [];
+  for (const hex of stream.matchAll(/<([0-9A-Fa-f]+)>/g)) {
+    parts.push(Buffer.from(hex[1], "hex").toString("latin1"));
+  }
+  return parts.join("");
+}
 
 function order(overrides = {}) {
   return {
@@ -29,6 +46,7 @@ function order(overrides = {}) {
     shipping_amount: 0,
     promo_code: "WELCOME10",
     payment_method: "upi",
+    payment_status: "Paid",
     payment_date: new Date("2026-08-12T00:00:00Z"),
     razorpay_payment_id: "pay_test123",
     whatsapp_updates_consent: true,
@@ -172,6 +190,24 @@ test("paid-order fallback PDF contains a valid PDF header and HSN", async () => 
   assert.equal(pdf.buffer.subarray(0, 5).toString("ascii"), "%PDF-");
   assert.ok(pdf.buffer.length > 1000);
   assert.equal(pdf.source, "local_fallback");
+});
+
+test("Pending COD fallback PDF shows PENDING and TOTAL DUE, not TOTAL PAID", async () => {
+  const pdf = await generateLocalInvoicePdf(order({
+    payment_mode: "cod",
+    payment_method: "cod",
+    payment_status: "Pending",
+    razorpay_payment_id: null,
+  }));
+  assert.equal(pdf.contentType, "application/pdf");
+  assert.equal(pdf.source, "local_fallback");
+  const text = pdfVisibleText(pdf.buffer);
+  assert.match(text, /PENDING/);
+  assert.match(text, /TOTAL DUE/);
+  assert.doesNotMatch(text, /TOTAL PAID/);
+  assert.match(text, /Cash on delivery/);
+  assert.doesNotMatch(text, /paid order snapshot/);
+  assert.doesNotMatch(text, /Razorpay payment reference/);
 });
 
 test("COD Pending and Paid orders may generate an invoice", () => {

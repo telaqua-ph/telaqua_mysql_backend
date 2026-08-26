@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { isCodOrder } from "./paymentMode.js";
 
 function money(value) {
   const amount = Number(value || 0);
@@ -30,7 +31,7 @@ function cell(doc, text, x, y, width, options = {}) {
     });
 }
 
-/** Generate a paid-order invoice when Swipe PDF retrieval is unavailable. */
+/** Generate an invoice PDF when Swipe PDF retrieval is unavailable. */
 export async function generateLocalInvoicePdf(order) {
   const chunks = [];
   const doc = new PDFDocument({ size: "A4", margin: 45, info: {
@@ -54,6 +55,22 @@ export async function generateLocalInvoicePdf(order) {
   const taxable = Number(order.taxable_amount ?? finalTotal - shipping);
   const gst = Number(order.gst_amount || 0);
   const gstRate = Number(order.gst_rate ?? 18);
+  const isPaid = String(order.payment_status || "").trim() === "Paid";
+  const cod = isCodOrder(order);
+  const paymentLabel = cod
+    ? "COD"
+    : String(order.payment_method || "Razorpay");
+  const statusLabel = isPaid ? "PAID" : "PENDING";
+  const statusColor = isPaid ? "#008060" : "#B45309";
+  const totalLabel = isPaid ? "TOTAL PAID" : "TOTAL DUE";
+  const footerReference = cod
+    ? (isPaid
+      ? "COD payment collected."
+      : "Cash on delivery. Payment is pending until collected.")
+    : `Razorpay payment reference: ${order.razorpay_payment_id || "-"}`;
+  const footerNote = isPaid
+    ? "This fallback copy was generated from the paid order snapshot."
+    : "This fallback copy was generated from the order snapshot. Payment is pending.";
 
   doc.rect(0, 0, 595.28, 112).fill("#063970");
   doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(25)
@@ -79,9 +96,9 @@ export async function generateLocalInvoicePdf(order) {
   cell(doc, "Order", 355, 159, 90, { bold: true });
   cell(doc, order.order_number || order.id, 445, 159, 105, { align: "right" });
   cell(doc, "Payment", 355, 178, 90, { bold: true });
-  cell(doc, String(order.payment_method || "Razorpay"), 445, 178, 105, { align: "right" });
+  cell(doc, paymentLabel, 445, 178, 105, { align: "right" });
   cell(doc, "Status", 355, 197, 90, { bold: true });
-  cell(doc, "PAID", 445, 197, 105, { align: "right", bold: true, color: "#008060" });
+  cell(doc, statusLabel, 445, 197, 105, { align: "right", bold: true, color: statusColor });
 
   const top = 250;
   doc.rect(45, top, 505, 28).fill("#EAF2F8");
@@ -114,14 +131,14 @@ export async function generateLocalInvoicePdf(order) {
   }
   summaryY += 28;
   doc.rect(355, summaryY - 7, 195, 32).fill("#063970");
-  cell(doc, "TOTAL PAID", 365, summaryY + 3, 90, { bold: true, size: 11, color: "#FFFFFF" });
+  cell(doc, totalLabel, 365, summaryY + 3, 90, { bold: true, size: 11, color: "#FFFFFF" });
   cell(doc, money(finalTotal), 455, summaryY + 3, 87, {
     bold: true, size: 11, color: "#FFFFFF", align: "right",
   });
 
   doc.fillColor("#52616B").font("Helvetica").fontSize(8)
-    .text(`Razorpay payment reference: ${order.razorpay_payment_id || "-"}`, 45, 690, { width: 505 })
-    .text("This fallback copy was generated from the paid order snapshot.", 45, 708, { width: 505 })
+    .text(footerReference, 45, 690, { width: 505 })
+    .text(footerNote, 45, 708, { width: 505 })
     .text("Thank you for choosing Tel-Aqua.", 45, 750, { width: 505, align: "center" });
   doc.end();
 
