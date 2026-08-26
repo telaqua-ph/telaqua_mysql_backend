@@ -395,7 +395,7 @@ function currentAdminId(req) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-/** GET /api/orders */
+/** GET /api/orders — latest 2000 rows (stable sort). Dashboard cards use /api/dashboard/stats. */
 export async function listOrders(req, res) {
   const adminId = currentAdminId(req);
   if (!adminId) {
@@ -418,8 +418,8 @@ export async function listOrders(req, res) {
          LEFT JOIN admin_order_views aov
            ON aov.order_id = o.id
           AND aov.admin_id = ?
-         ORDER BY o.created_at DESC
-         LIMIT 100`,
+         ORDER BY o.created_at DESC, o.id DESC
+         LIMIT 2000`,
         [adminId]
       );
       rows = result.rows;
@@ -435,8 +435,8 @@ export async function listOrders(req, res) {
              NULL AS first_viewed_at,
              NULL AS last_viewed_at
            FROM orders o
-           ORDER BY o.created_at DESC
-           LIMIT 100`
+           ORDER BY o.created_at DESC, o.id DESC
+           LIMIT 2000`
         );
         rows = fallback.rows;
       } else {

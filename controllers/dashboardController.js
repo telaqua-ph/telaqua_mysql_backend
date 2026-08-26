@@ -207,6 +207,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
        ${unseenJoin}
        ${shipmentsJoin}
      ),
+     /* Full-table operations counts (no date filter, no LIMIT). Paid = payment_status Paid only. */
      operational AS (
        SELECT
          CAST(COUNT(*) AS SIGNED) AS total_orders,
