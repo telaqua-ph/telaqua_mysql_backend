@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { pool, query } from "../config/db.js";
+import { isMissingTableError } from "../lib/dbErrors.js";
 import {
   customerSessionExpiry,
   generateOtp,
@@ -15,6 +16,12 @@ import {
   sendOtp,
 } from "../services/interaktOtpService.js";
 import { getInteraktConfigurationStatus } from "../services/interaktService.js";
+import {
+  dispatchInventoryAlertEmails,
+  restoreStockForCancellation,
+} from "../services/inventoryService.js";
+import { normalizePaymentMode } from "../services/paymentMode.js";
+import { isCustomerCodCancellable, evaluateCustomerCodCancel } from "../services/customerCodCancel.js";
 
 const OTP_EXPIRY_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
@@ -32,7 +39,7 @@ const PHONE_MATCH_SQL = `
 const SAFE_ORDER_COLUMNS = `
   id, order_number, created_at, updated_at, quantity, unit_price,
   COALESCE(final_total, total_amount) AS total_amount,
-  payment_method, payment_status, order_status,
+  payment_method, payment_mode, payment_status, order_status,
   shipment_status, waybill, delhivery_shipment_id,
   shipment_created_at, shipment_confirmed_at,
   pickup_status, pickup_requested_at, tracking_status, tracking_updated_at,
@@ -68,45 +75,105 @@ function apiOrigin(req) {
   return `${forwarded || req.protocol || "https"}://${req.get("host")}`;
 }
 
-function safeOrder(order, req, detailed = false) {
-  const paid = String(order.payment_status || "").toLowerCase() === "paid";
-  const invoiceAvailable = paid || Boolean(order.swipe_invoice_id) ||
-    String(order.invoice_status || "").toLowerCase() === "generated";
+function mergeShipmentFields(order, shipment = null) {
+  if (!order) return order;
+  if (!shipment) return order;
+  return {
+    ...order,
+    waybill: order.waybill || shipment.waybill_number || shipment.waybill,
+    delhivery_shipment_id:
+      order.delhivery_shipment_id || shipment.shipment_id,
+    shipment_created_at: order.shipment_created_at || shipment.shipment_created_at,
+    shipment_status: order.shipment_status || shipment.shipment_status,
+    pickup_requested_at: order.pickup_requested_at || shipment.pickup_requested_at,
+    fulfillment_status: order.fulfillment_status || shipment.fulfillment_status,
+  };
+}
+
+function safeOrder(order, req, detailed = false, shipment = null) {
+  const merged = mergeShipmentFields(order, shipment);
+  const paid = String(merged.payment_status || "").toLowerCase() === "paid";
+  const invoiceAvailable = paid || Boolean(merged.swipe_invoice_id) ||
+    String(merged.invoice_status || "").toLowerCase() === "generated";
   const result = {
-    id: order.id,
-    order_number: order.order_number,
-    created_at: order.created_at,
-    updated_at: order.updated_at,
-    quantity: order.quantity,
-    unit_price: Number(order.unit_price),
-    total_amount: Number(order.total_amount),
-    payment_method: order.payment_method,
-    payment_status: order.payment_status,
-    order_status: order.order_status,
-    shipment_status: order.shipment_status,
-    tracking_number: order.waybill || null,
-    tracking_status: order.tracking_status || null,
-    tracking_updated_at: order.tracking_updated_at || null,
-    shipment_created_at: order.shipment_created_at || null,
-    shipment_confirmed_at: order.shipment_confirmed_at || null,
+    id: merged.id,
+    order_number: merged.order_number,
+    created_at: merged.created_at,
+    updated_at: merged.updated_at,
+    quantity: merged.quantity,
+    unit_price: Number(merged.unit_price),
+    total_amount: Number(merged.total_amount),
+    payment_method: merged.payment_method,
+    payment_mode: normalizePaymentMode(merged),
+    payment_status: merged.payment_status,
+    order_status: merged.order_status,
+    shipment_status: merged.shipment_status,
+    tracking_number: merged.waybill || null,
+    waybill: merged.waybill || null,
+    delhivery_shipment_id: merged.delhivery_shipment_id || null,
+    tracking_status: merged.tracking_status || null,
+    tracking_updated_at: merged.tracking_updated_at || null,
+    shipment_created_at: merged.shipment_created_at || null,
+    shipment_confirmed_at: merged.shipment_confirmed_at || null,
+    pickup_requested_at: merged.pickup_requested_at || null,
+    can_cancel: isCustomerCodCancellable(merged, shipment),
     invoice_available: invoiceAvailable,
-    invoice_number: order.invoice_number || null,
-    invoice_status: order.invoice_status || null,
-    invoice_generated_at: order.invoice_generated_at || null,
+    invoice_number: merged.invoice_number || null,
+    invoice_status: merged.invoice_status || null,
+    invoice_generated_at: merged.invoice_generated_at || null,
     invoice_url: invoiceAvailable
-      ? `${apiOrigin(req)}/api/payment/invoice-download?order_id=${encodeURIComponent(order.id)}`
+      ? `${apiOrigin(req)}/api/payment/invoice-download?order_id=${encodeURIComponent(merged.id)}`
       : null,
   };
   if (detailed) {
     result.delivery_address = {
-      name: order.customer_name,
-      address: order.address,
-      city: order.city,
-      state: order.state,
-      pincode: order.pincode,
+      name: merged.customer_name,
+      address: merged.address,
+      city: merged.city,
+      state: merged.state,
+      pincode: merged.pincode,
     };
   }
   return result;
+}
+
+async function loadLatestShipmentsMap(orderIds) {
+  const ids = orderIds.map((id) => Number(id)).filter(Number.isInteger);
+  if (!ids.length) return new Map();
+  try {
+    const placeholders = ids.map(() => "?").join(",");
+    const { rows } = await query(
+      `SELECT order_id, waybill_number, shipment_id, shipment_created_at,
+              fulfillment_status, shipment_status, pickup_requested_at
+       FROM shipments
+       WHERE sequence_no = 1 AND order_id IN (${placeholders})`,
+      ids
+    );
+    return new Map(rows.map((row) => [Number(row.order_id), row]));
+  } catch (error) {
+    if (isMissingTableError(error)) return new Map();
+    throw error;
+  }
+}
+
+async function loadLatestShipment(orderId, client = null) {
+  const id = Number(orderId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const run = client ? client.query.bind(client) : query;
+  try {
+    const { rows } = await run(
+      `SELECT order_id, waybill_number, shipment_id, shipment_created_at,
+              fulfillment_status, shipment_status, pickup_requested_at
+       FROM shipments
+       WHERE sequence_no = 1 AND order_id = ?
+       LIMIT 1`,
+      [id]
+    );
+    return rows[0] || null;
+  } catch (error) {
+    if (isMissingTableError(error)) return null;
+    throw error;
+  }
 }
 
 async function loadOwnedOrder(orderId, phone) {
@@ -405,9 +472,12 @@ export async function listCustomerOrders(req, res) {
      ORDER BY created_at DESC, id DESC`,
     [req.customer.phone]
   );
+  const shipments = await loadLatestShipmentsMap(rows.map((row) => row.id));
   return res.status(200).json({
     success: true,
-    orders: rows.map((row) => safeOrder(row, req)),
+    orders: rows.map((row) =>
+      safeOrder(row, req, false, shipments.get(Number(row.id)) || null)
+    ),
   });
 }
 
@@ -424,7 +494,11 @@ export async function getRecentCustomerOrder(req, res) {
   if (!rows.length) {
     return res.status(404).json({ success: false, message: "No orders found" });
   }
-  return res.status(200).json({ success: true, order: safeOrder(rows[0], req, true) });
+  const shipment = await loadLatestShipment(rows[0].id);
+  return res.status(200).json({
+    success: true,
+    order: safeOrder(rows[0], req, true, shipment),
+  });
 }
 
 export async function getCustomerOrder(req, res) {
@@ -432,7 +506,126 @@ export async function getCustomerOrder(req, res) {
   if (!order) {
     return missingOwnedOrderResponse(req.params.orderId, res);
   }
-  return res.status(200).json({ success: true, order: safeOrder(order, req, true) });
+  const shipment = await loadLatestShipment(order.id);
+  return res.status(200).json({
+    success: true,
+    order: safeOrder(order, req, true, shipment),
+  });
+}
+
+/** POST /api/customer/orders/:orderId/cancel */
+export async function cancelCustomerCodOrder(req, res) {
+  const id = Number(req.params.orderId);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(404).json({ success: false, message: "Order not found" });
+  }
+
+  const { rowCount: exists } = await query(
+    "SELECT 1 FROM orders WHERE id = ? LIMIT 1",
+    [id]
+  );
+  if (!exists) {
+    return res.status(404).json({ success: false, message: "Order not found" });
+  }
+
+  const owned = await loadOwnedOrder(id, req.customer.phone);
+  if (!owned) {
+    return res.status(403).json({
+      success: false,
+      message: "You are not authorized to cancel this order.",
+    });
+  }
+
+  const client = await pool.connect();
+  let inventoryEmails = [];
+  try {
+    await client.query("BEGIN");
+
+    const locked = await client.query(
+      `SELECT * FROM orders
+       WHERE id = ? AND ${PHONE_MATCH_SQL}
+       FOR UPDATE`,
+      [id, req.customer.phone]
+    );
+    const order = locked.rows[0];
+    if (!order) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        success: false,
+        message: "You are not authorized to cancel this order.",
+      });
+    }
+
+    let shipment = null;
+    try {
+      const shipResult = await client.query(
+        `SELECT order_id, waybill_number, shipment_id, shipment_created_at,
+                fulfillment_status, shipment_status, pickup_requested_at
+         FROM shipments
+         WHERE sequence_no = 1 AND order_id = ?
+         LIMIT 1
+         FOR UPDATE`,
+        [id]
+      );
+      shipment = shipResult.rows[0] || null;
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+    }
+
+    const eligibility = evaluateCustomerCodCancel(order, shipment);
+    if (!eligibility.ok) {
+      await client.query("ROLLBACK");
+      return res.status(eligibility.status).json({
+        success: false,
+        message: eligibility.message,
+      });
+    }
+
+    const updated = await client.query(
+      `UPDATE orders
+       SET order_status = 'Cancelled', updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+         AND order_status <> 'Cancelled'`,
+      [id]
+    );
+    if (!updated.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        success: false,
+        message: "This order has already been cancelled.",
+      });
+    }
+
+    const restoreResult = await restoreStockForCancellation(client, {
+      orderId: order.id,
+      orderNumber: order.order_number,
+      quantity: order.quantity,
+      adminId: null,
+    });
+    inventoryEmails = restoreResult.pendingEmails || [];
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  if (inventoryEmails.length) {
+    dispatchInventoryAlertEmails(inventoryEmails);
+  }
+
+  const { rows } = await query(
+    `SELECT ${SAFE_ORDER_COLUMNS} FROM orders WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  const shipment = await loadLatestShipment(id);
+  return res.status(200).json({
+    success: true,
+    message: "Order cancelled successfully",
+    order: safeOrder(rows[0], req, true, shipment),
+  });
 }
 
 export async function trackCustomerOrder(req, res) {

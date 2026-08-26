@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  cancelCustomerCodOrder,
   getCustomerOrder,
   getCustomerOtpProviderStatus,
   getCustomerProfile,
@@ -25,6 +26,7 @@ router.get("/profile", asyncRoute(requireCustomerAuth), asyncRoute(getCustomerPr
 router.get("/orders", asyncRoute(requireCustomerAuth), asyncRoute(listCustomerOrders));
 router.get("/orders/recent", asyncRoute(requireCustomerAuth), asyncRoute(getRecentCustomerOrder));
 router.get("/orders/:orderId/tracking", asyncRoute(requireCustomerAuth), asyncRoute(trackCustomerOrder));
+router.post("/orders/:orderId/cancel", asyncRoute(requireCustomerAuth), asyncRoute(cancelCustomerCodOrder));
 router.get("/orders/:orderId", asyncRoute(requireCustomerAuth), asyncRoute(getCustomerOrder));
 
 export default router;
