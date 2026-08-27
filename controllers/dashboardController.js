@@ -36,6 +36,7 @@ function mapStatsRow(row, from, to) {
     paidOrders: Number(row.paid_orders || 0),
     pendingPayments: Number(row.pending_payments || 0),
     codOrders: Number(row.cod_orders || 0),
+    cancelledOrders: Number(row.cancelled_orders || 0),
     shipmentsCreated: Number(row.shipments_created || 0),
     unseenOrders: Number(row.unseen_orders || 0),
     devicesSold: Number(row.devices_sold || 0),
@@ -216,6 +217,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Pending' THEN 1 ELSE 0 END) AS SIGNED) AS pending_payments,
          CAST(SUM(CASE WHEN ${codExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_orders,
          CAST(SUM(CASE WHEN ${shipmentExpr} THEN 1 ELSE 0 END) AS SIGNED) AS shipments_created,
+         CAST(SUM(CASE WHEN LOWER(${orderStatusExpr}) = 'cancelled' THEN 1 ELSE 0 END) AS SIGNED) AS cancelled_orders,
          CAST(SUM(CASE WHEN ${unseenPredicate} THEN 1 ELSE 0 END) AS SIGNED) AS unseen_orders
        FROM order_rows o
      ),
@@ -322,6 +324,7 @@ export async function getStats(req, res) {
         pendingPayments: 0,
         codOrders: 0,
         shipmentsCreated: 0,
+        cancelledOrders: 0,
         unseenOrders: 0,
         devicesSold: 0,
         revenueReceived: 0,
