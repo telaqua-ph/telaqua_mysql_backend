@@ -435,6 +435,99 @@ export async function verifyCustomerOtp(req, res) {
   }
 }
 
+/**
+ * POST /api/customer/auth/verify-otp-ownership
+ * Proves control of the phone using the same OTP rows/hash rules as login.
+ * Does not create a customer session or JWT.
+ */
+export async function verifyCustomerOtpOwnership(req, res) {
+  if (!isSecureRequest(req)) {
+    return res.status(400).json({ success: false, message: "HTTPS is required" });
+  }
+  const validated = validatePhone(req.body);
+  const otp = typeof req.body?.otp === "string" ? req.body.otp.trim() : "";
+  if (validated.error || !/^\d{6}$/.test(otp)) {
+    return res.status(400).json({ success: false, message: "Invalid phone or OTP" });
+  }
+
+  const phone = validated.phone;
+  const client = await pool.connect();
+  const lockName = `customer_otp:${phone}`;
+  let lockHeld = false;
+  try {
+    await client.query("BEGIN");
+    const lock = await client.query("SELECT GET_LOCK(?, 10) AS locked", [lockName]);
+    if (!lock.rows[0]?.locked) {
+      await client.query("ROLLBACK");
+      return res.status(503).json({ success: false, message: "Unable to verify OTP" });
+    }
+    lockHeld = true;
+    const found = await client.query(
+      `SELECT id, otp_hash, expires_at, attempts,
+              (expires_at > CURRENT_TIMESTAMP) AS is_valid
+       FROM customer_auth_otps
+       WHERE phone = ? AND verified_at IS NULL AND invalidated_at IS NULL
+       ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+      [phone]
+    );
+    if (!found.rows.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ success: false, message: "OTP expired. Please request a new OTP." });
+    }
+    const record = found.rows[0];
+    if (!record.is_valid) {
+      await client.query(
+        "UPDATE customer_auth_otps SET invalidated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [record.id]
+      );
+      await client.query("COMMIT");
+      return res.status(400).json({ success: false, message: "OTP expired. Please request a new OTP." });
+    }
+    if (record.attempts >= OTP_MAX_ATTEMPTS) {
+      await client.query("ROLLBACK");
+      return res.status(429).json({ success: false, message: "Too many OTP attempts. Request a new OTP." });
+    }
+    if (!verifyOtpHash(phone, otp, record.otp_hash)) {
+      const nextAttempts = Number(record.attempts) + 1;
+      await client.query(
+        `UPDATE customer_auth_otps
+         SET attempts = ?,
+             invalidated_at = CASE
+               WHEN ? >= ? THEN CURRENT_TIMESTAMP
+               ELSE invalidated_at END
+         WHERE id = ?`,
+        [nextAttempts, nextAttempts, OTP_MAX_ATTEMPTS, record.id]
+      );
+      await client.query("COMMIT");
+      return res.status(nextAttempts >= OTP_MAX_ATTEMPTS ? 429 : 400).json({
+        success: false,
+        message: nextAttempts >= OTP_MAX_ATTEMPTS
+          ? "Too many OTP attempts. Request a new OTP."
+          : "Incorrect OTP. Please check and try again.",
+      });
+    }
+
+    await client.query(
+      `UPDATE customer_auth_otps SET verified_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [record.id]
+    );
+    await client.query(
+      `UPDATE customer_auth_otps SET invalidated_at = CURRENT_TIMESTAMP
+       WHERE phone = ? AND id <> ? AND verified_at IS NULL AND invalidated_at IS NULL`,
+      [phone, record.id]
+    );
+    await client.query("COMMIT");
+    return res.status(200).json({ success: true, phone });
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    console.error("Checkout OTP ownership verification error:", error?.message || error);
+    return res.status(500).json({ success: false, message: "Unable to verify OTP" });
+  } finally {
+    if (lockHeld) await client.query("SELECT RELEASE_LOCK(?)", [lockName]).catch(() => {});
+    client.release();
+  }
+}
+
 async function loadProfile(phone) {
   const { rows } = await query(
     `SELECT customer_name, email FROM orders
