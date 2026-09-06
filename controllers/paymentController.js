@@ -9,6 +9,11 @@
 import crypto from "node:crypto";
 import { query } from "../config/db.js";
 import { isMissingColumnError } from "../lib/dbErrors.js";
+import {
+  attributionValues,
+  isMissingAttributionColumnError,
+  parseOrderAttribution,
+} from "../lib/orderAttribution.js";
 import { ensureColumn } from "../lib/schemaHelpers.js";
 import { getRazorpayClient } from "../config/razorpay.js";
 import {
@@ -161,6 +166,7 @@ function validateCreatePaymentOrder(body) {
       promo_code,
       whatsapp_updates_consent: consent.whatsapp_updates_consent,
       whatsapp_consent_at: consent.whatsapp_consent_at,
+      ...parseOrderAttribution(body),
     },
   };
 }
@@ -1017,64 +1023,119 @@ export async function createPaymentOrder(req, res) {
 
     const financial = buildFinancialSnapshot(pricing);
     const invoiceAccess = createInvoiceAccessToken();
-    const inserted = await query(
-      `INSERT INTO orders (
-        customer_name,
-        phone,
-        email,
-        address,
-        city,
-        state,
-        pincode,
-        quantity,
-        unit_price,
-        total_amount,
-        payment_method,
-        payment_status,
-        order_status,
-        promo_code,
-        original_amount,
-        discount_amount,
-        subtotal,
-        taxable_amount,
-        gst_amount,
-        gst_rate,
-        shipping_amount,
-        final_total,
-        invoice_status,
-        invoice_access_token_hash,
-        whatsapp_updates_consent,
-        whatsapp_consent_at
-      ) VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        'Razorpay', 'Pending', 'New', ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, 'not_created', ?, ?, ?
-      )`,
-      [
-        orderData.customer_name,
-        orderData.phone,
-        orderData.email,
-        orderData.address,
-        orderData.city,
-        orderData.state,
-        orderData.pincode,
-        orderData.quantity,
-        pricing.unit_price,
-        pricing.total_amount,
-        pricing.promo_code,
-        pricing.original_amount,
-        pricing.discount_amount,
-        financial.subtotal,
-        financial.taxableAmount,
-        financial.gstAmount,
-        financial.gstRate,
-        financial.shippingAmount,
-        financial.finalTotal,
-        invoiceAccess.hash,
-        orderData.whatsapp_updates_consent ? 1 : 0,
-        orderData.whatsapp_consent_at,
-      ]
-    );
+    const razorpayCoreValues = [
+      orderData.customer_name,
+      orderData.phone,
+      orderData.email,
+      orderData.address,
+      orderData.city,
+      orderData.state,
+      orderData.pincode,
+      orderData.quantity,
+      pricing.unit_price,
+      pricing.total_amount,
+      pricing.promo_code,
+      pricing.original_amount,
+      pricing.discount_amount,
+      financial.subtotal,
+      financial.taxableAmount,
+      financial.gstAmount,
+      financial.gstRate,
+      financial.shippingAmount,
+      financial.finalTotal,
+      invoiceAccess.hash,
+      orderData.whatsapp_updates_consent ? 1 : 0,
+      orderData.whatsapp_consent_at,
+    ];
+    let inserted;
+    try {
+      inserted = await query(
+        `INSERT INTO orders (
+          customer_name,
+          phone,
+          email,
+          address,
+          city,
+          state,
+          pincode,
+          quantity,
+          unit_price,
+          total_amount,
+          payment_method,
+          payment_status,
+          order_status,
+          promo_code,
+          original_amount,
+          discount_amount,
+          subtotal,
+          taxable_amount,
+          gst_amount,
+          gst_rate,
+          shipping_amount,
+          final_total,
+          invoice_status,
+          invoice_access_token_hash,
+          whatsapp_updates_consent,
+          whatsapp_consent_at,
+          utm_source,
+          utm_medium,
+          utm_campaign,
+          utm_term,
+          utm_content,
+          gclid,
+          fbclid,
+          fbp,
+          fbc,
+          landing_url,
+          first_seen_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          'Razorpay', 'Pending', 'New', ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, 'not_created', ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )`,
+        [...razorpayCoreValues, ...attributionValues(orderData)]
+      );
+    } catch (insertError) {
+      if (!isMissingAttributionColumnError(insertError)) {
+        throw insertError;
+      }
+      inserted = await query(
+        `INSERT INTO orders (
+          customer_name,
+          phone,
+          email,
+          address,
+          city,
+          state,
+          pincode,
+          quantity,
+          unit_price,
+          total_amount,
+          payment_method,
+          payment_status,
+          order_status,
+          promo_code,
+          original_amount,
+          discount_amount,
+          subtotal,
+          taxable_amount,
+          gst_amount,
+          gst_rate,
+          shipping_amount,
+          final_total,
+          invoice_status,
+          invoice_access_token_hash,
+          whatsapp_updates_consent,
+          whatsapp_consent_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          'Razorpay', 'Pending', 'New', ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, 'not_created', ?, ?, ?
+        )`,
+        razorpayCoreValues
+      );
+    }
 
     const dbOrderId = inserted.insertId;
     const orderNumber = `TAQ-${String(dbOrderId).padStart(6, "0")}`;

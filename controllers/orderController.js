@@ -29,6 +29,11 @@ import {
   withNormalizedPaymentMode,
 } from "../services/paymentMode.js";
 import { isMissingColumnError } from "../lib/dbErrors.js";
+import {
+  attributionValues,
+  isMissingAttributionColumnError,
+  parseOrderAttribution,
+} from "../lib/orderAttribution.js";
 import { pool } from "../config/db.js";
 import crypto from "node:crypto";
 
@@ -378,6 +383,7 @@ function validateWebsiteCodOrder(body) {
       promo_code,
       whatsapp_updates_consent: consent.whatsapp_updates_consent,
       whatsapp_consent_at: consent.whatsapp_consent_at,
+      ...parseOrderAttribution(body),
     },
   };
 }
@@ -932,9 +938,31 @@ export async function createWebsiteCodOrder(req, res) {
       });
     }
 
-    let inserted;
-    try {
-      inserted = await query(
+    const codCoreValues = [
+      orderData.customer_name,
+      orderData.phone,
+      orderData.email,
+      orderData.address,
+      orderData.city,
+      orderData.state,
+      orderData.pincode,
+      orderData.quantity,
+      pricing.unit_price,
+      financial.finalTotal,
+      pricing.promo_code,
+      pricing.original_amount,
+      pricing.discount_amount,
+      financial.subtotal,
+      financial.taxableAmount,
+      financial.gstAmount,
+      financial.gstRate,
+      financial.shippingAmount,
+      financial.finalTotal,
+      orderData.whatsapp_updates_consent ? 1 : 0,
+      orderData.whatsapp_consent_at,
+    ];
+    const insertCodWithoutAttribution = () =>
+      query(
         `INSERT INTO orders (
           customer_name,
           phone,
@@ -968,78 +996,116 @@ export async function createWebsiteCodOrder(req, res) {
           ?, ?, ?, ?, ?, ?, ?, ?, ?,
           'not_created', ?, ?
         )`,
-        [
-          orderData.customer_name,
-          orderData.phone,
-          orderData.email,
-          orderData.address,
-          orderData.city,
-          orderData.state,
-          orderData.pincode,
-          orderData.quantity,
-          pricing.unit_price,
-          financial.finalTotal,
-          pricing.promo_code,
-          pricing.original_amount,
-          pricing.discount_amount,
-          financial.subtotal,
-          financial.taxableAmount,
-          financial.gstAmount,
-          financial.gstRate,
-          financial.shippingAmount,
-          financial.finalTotal,
-          orderData.whatsapp_updates_consent ? 1 : 0,
-          orderData.whatsapp_consent_at,
-        ]
+        codCoreValues
+      );
+
+    let inserted;
+    try {
+      inserted = await query(
+        `INSERT INTO orders (
+          customer_name,
+          phone,
+          email,
+          address,
+          city,
+          state,
+          pincode,
+          quantity,
+          unit_price,
+          total_amount,
+          payment_method,
+          payment_status,
+          order_status,
+          payment_mode,
+          promo_code,
+          original_amount,
+          discount_amount,
+          subtotal,
+          taxable_amount,
+          gst_amount,
+          gst_rate,
+          shipping_amount,
+          final_total,
+          invoice_status,
+          whatsapp_updates_consent,
+          whatsapp_consent_at,
+          utm_source,
+          utm_medium,
+          utm_campaign,
+          utm_term,
+          utm_content,
+          gclid,
+          fbclid,
+          fbp,
+          fbc,
+          landing_url,
+          first_seen_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          'cod', 'Pending', 'Confirmed', 'cod',
+          ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          'not_created', ?, ?,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )`,
+        [...codCoreValues, ...attributionValues(orderData)]
       );
     } catch (error) {
-      const msg = String(error?.message || "");
-      if (/Unknown column ['`]?payment_mode['`]?/i.test(msg) || (isMissingColumnError(error, "payment_mode") && /payment_mode/i.test(msg))) {
-        return res.status(503).json({
-          success: false,
-          message:
-            "Orders table is missing payment_mode. Run node scripts/migrate-payment-mode.js",
-        });
+      if (isMissingAttributionColumnError(error)) {
+        try {
+          inserted = await insertCodWithoutAttribution();
+        } catch (retryError) {
+          error = retryError;
+        }
       }
-      if (error?.code === "ER_BAD_FIELD_ERROR" || /Unknown column/i.test(msg)) {
-        inserted = await query(
-          `INSERT INTO orders (
-            customer_name,
-            phone,
-            email,
-            address,
-            city,
-            state,
-            pincode,
-            quantity,
-            unit_price,
-            total_amount,
-            payment_method,
-            payment_status,
-            order_status,
-            payment_mode,
-            whatsapp_updates_consent,
-            whatsapp_consent_at
-          ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod', ?, ?
-          )`,
-          [
-            orderData.customer_name,
-            orderData.phone,
-            orderData.email,
-            orderData.address,
-            orderData.city,
-            orderData.state,
-            orderData.pincode,
-            orderData.quantity,
-            pricing.unit_price,
-            financial.finalTotal,
-            orderData.whatsapp_updates_consent ? 1 : 0,
-            orderData.whatsapp_consent_at,
-          ]
-        );
-      } else {
-        throw error;
+      if (!inserted) {
+        const msg = String(error?.message || "");
+        if (/Unknown column ['`]?payment_mode['`]?/i.test(msg) || (isMissingColumnError(error, "payment_mode") && /payment_mode/i.test(msg))) {
+          return res.status(503).json({
+            success: false,
+            message:
+              "Orders table is missing payment_mode. Run node scripts/migrate-payment-mode.js",
+          });
+        }
+        if (error?.code === "ER_BAD_FIELD_ERROR" || /Unknown column/i.test(msg)) {
+          inserted = await query(
+            `INSERT INTO orders (
+              customer_name,
+              phone,
+              email,
+              address,
+              city,
+              state,
+              pincode,
+              quantity,
+              unit_price,
+              total_amount,
+              payment_method,
+              payment_status,
+              order_status,
+              payment_mode,
+              whatsapp_updates_consent,
+              whatsapp_consent_at
+            ) VALUES (
+              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod', ?, ?
+            )`,
+            [
+              orderData.customer_name,
+              orderData.phone,
+              orderData.email,
+              orderData.address,
+              orderData.city,
+              orderData.state,
+              orderData.pincode,
+              orderData.quantity,
+              pricing.unit_price,
+              financial.finalTotal,
+              orderData.whatsapp_updates_consent ? 1 : 0,
+              orderData.whatsapp_consent_at,
+            ]
+          );
+        } else {
+          throw error;
+        }
       }
     }
 
