@@ -16,6 +16,7 @@ import {
   deductStockForSale,
   dispatchInventoryAlertEmails,
 } from "./inventoryService.js";
+import { triggerOrderPlacedWhatsAppAsync } from "./interaktOrderPlacedService.js";
 
 /** Hostinger MySQL: resolve strings in JS — avoid mixed-collation COALESCE/NULLIF in SQL. */
 function coalesceString(...values) {
@@ -468,6 +469,12 @@ export async function confirmCapturedRazorpayPayment({
   if (inventoryEmails.length) {
     dispatchInventoryAlertEmails(inventoryEmails);
   }
+
+  triggerOrderPlacedWhatsAppAsync({
+    orderDbId: newlyPaid.id,
+    orderId: newlyPaid.order_number,
+    isTestOrder: newlyPaid.is_test_order,
+  });
 
   return { status: "marked_paid", order: newlyPaid };
 }
