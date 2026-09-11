@@ -185,6 +185,11 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const unseenPredicate = includeViews ? "is_seen = 0" : "FALSE";
   const revenueExpr = revenueExpression(columns);
   const paidDateExpr = paidDateExpression(columns);
+  // IST midnight, expressed in the same session time as CURRENT_TIMESTAMP payments.
+  // Numeric offsets also work when MySQL timezone tables are not installed.
+  const todayStartExpr = `TIMESTAMPADD(SECOND,
+    TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()),
+    DATE_SUB(DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)), INTERVAL 330 MINUTE))`;
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const codExpr = codOrderPredicate(columns);
   const quantityExpr = columns.has("quantity") ? "quantity" : "0";
@@ -235,15 +240,15 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(COALESCE(
            SUM(CASE
              WHEN ${paidDateExpr} IS NOT NULL
-               AND ${paidDateExpr} >= CURDATE()
-               AND ${paidDateExpr} < DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+               AND ${paidDateExpr} >= ${todayStartExpr}
+               AND ${paidDateExpr} < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
              THEN ${quantityExpr} ELSE 0 END),
            0) AS SIGNED) AS today_devices_sold,
          CAST(COALESCE(
            SUM(CASE
              WHEN ${paidDateExpr} IS NOT NULL
-               AND ${paidDateExpr} >= CURDATE()
-               AND ${paidDateExpr} < DATE_ADD(CURDATE(), INTERVAL 1 DAY)
+               AND ${paidDateExpr} >= ${todayStartExpr}
+               AND ${paidDateExpr} < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
              THEN ${revenueExpr} ELSE 0 END),
            0) AS DECIMAL(12,2)) AS today_revenue,
          CAST(COALESCE(
