@@ -25,6 +25,7 @@ import logisticsRoutes from "./routes/logisticsRoutes.js";
 import promoRoutes from "./routes/promo.js";
 import promoCodesRoutes from "./routes/promoCodes.js";
 import inventoryRoutes from "./routes/inventory.js";
+import adminPushRoutes from "./routes/adminPush.js";
 import { handleSwipeWebhook } from "./controllers/swipeWebhookController.js";
 import { handleRazorpayWebhook } from "./controllers/razorpayWebhookController.js";
 
@@ -155,6 +156,7 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/delivery", deliveryRoutes);
 app.use("/api/delhivery", deliveryRoutes);
 app.use("/api/admin/logistics", logisticsRoutes);
+app.use("/api/admin/push", adminPushRoutes);
 
 // 404 fallback
 app.use((req, res) => {

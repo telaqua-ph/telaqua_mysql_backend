@@ -17,6 +17,7 @@
     "migrate:order-views": "node scripts/migrate-order-views.js",
     "migrate:delhivery": "node scripts/migrate-delhivery-logistics.js",
     "migrate:payment-mode": "node scripts/migrate-payment-mode.js",
+    "migrate:admin-web-push": "node scripts/migrate-admin-web-push.js",
     "test": "node --test --test-isolation=none"
   },
   "dependencies": {
@@ -30,7 +31,8 @@
     "mysql2": "^3.14.3",
     "nodemailer": "^6.10.1",
     "pdfkit": "^0.17.2",
-    "razorpay": "^2.9.8"
+    "razorpay": "^2.9.8",
+    "web-push": "^3.6.7"
   },
   "keywords": [
     "telaqua",
