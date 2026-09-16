@@ -5,6 +5,7 @@ import {
   isStatusEventCurrent,
   parseDelhiveryScanPush,
   persistDelhiveryScanPush,
+  buildShipmentStatusFlags,
 } from "../services/delhiveryWebhookService.js";
 import { deriveShipmentStatusDisplay } from "../services/shipmentStatusDisplay.js";
 import { createDelhiveryWebhookHandler } from "../controllers/delhiveryWebhookController.js";
@@ -169,6 +170,54 @@ test("does not regress a terminal shipment with a later lower-rank scan", async 
   assert.equal(result.regressionBlocked, true);
   assert.equal(result.applied, false);
   assert.equal(fake.state.shipmentUpdates, 0);
+});
+
+test("buildShipmentStatusFlags uses numeric markers instead of SQL string IN", () => {
+  assert.deepEqual(buildShipmentStatusFlags("in_transit"), {
+    markPickedUp: 1,
+    isDelivered: 0,
+    isNdr: 0,
+  });
+  assert.deepEqual(buildShipmentStatusFlags("delivered"), {
+    markPickedUp: 1,
+    isDelivered: 1,
+    isNdr: 0,
+  });
+  assert.deepEqual(buildShipmentStatusFlags("ndr"), {
+    markPickedUp: 0,
+    isDelivered: 0,
+    isNdr: 1,
+  });
+  assert.deepEqual(buildShipmentStatusFlags("shipment_created"), {
+    markPickedUp: 0,
+    isDelivered: 0,
+    isNdr: 0,
+  });
+});
+
+test("webhook apply path no longer embeds string IN lists in SQL", async () => {
+  const fake = fakePool();
+  const captured = [];
+  const originalConnect = fake.pool.connect;
+  fake.pool.connect = async () => {
+    const client = await originalConnect();
+    const originalQuery = client.query.bind(client);
+    client.query = async (sql, params = []) => {
+      if (/UPDATE shipments SET/.test(sql)) {
+        captured.push({ sql, params });
+      }
+      return originalQuery(sql, params);
+    };
+    return client;
+  };
+
+  await persistDelhiveryScanPush(parseDelhiveryScanPush(payload()), fake.pool);
+  assert.equal(captured.length, 1);
+  assert.doesNotMatch(captured[0].sql, /\bIN\s*\(/i);
+  assert.doesNotMatch(captured[0].sql, /=\s*'delivered'/i);
+  assert.doesNotMatch(captured[0].sql, /=\s*'ndr'/i);
+  assert.match(captured[0].sql, /WHEN \? = 1/);
+  assert.equal(captured[0].params[5], 1); // markPickedUp for in_transit
 });
 
 test("status time comparison accepts equal/newer and rejects older events", () => {

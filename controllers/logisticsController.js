@@ -25,7 +25,10 @@ import {
   isTerminalFulfillmentStatus,
   mapDelhiveryStatus,
 } from "../services/logisticsState.js";
-import { isStatusEventCurrent } from "../services/delhiveryWebhookService.js";
+import {
+  buildShipmentStatusFlags,
+  isStatusEventCurrent,
+} from "../services/delhiveryWebhookService.js";
 import { canFulfillOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
 
@@ -73,10 +76,18 @@ function assertDelhiveryAccepted(payload, operation) {
   const message = logicalFailureMessage(payload);
   if (!message) return;
   const error = new Error(message);
-  error.code = "DELHIVERY_UPSTREAM_ERROR";
-  error.status = 422;
+  const missingWaybill = /data does not exists? for provided waybill/i.test(message);
+  error.code = missingWaybill
+    ? "DELHIVERY_WAYBILL_NOT_FOUND"
+    : "DELHIVERY_UPSTREAM_ERROR";
+  error.status = missingWaybill ? 404 : 422;
   error.operation = operation;
   throw error;
+}
+
+/** Collation-safe string compare for Hostinger MySQL (unicode_ci vs bin params). */
+export function collationSafeEq(columnSql, paramPlaceholder = "?") {
+  return `(${columnSql}) COLLATE utf8mb4_unicode_ci = CONVERT(${paramPlaceholder} USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
 }
 
 function findResponseValue(payload, keys, depth = 0) {
@@ -573,19 +584,52 @@ async function refreshOneShipment(inputShipment, actorId = null) {
     const inserted = await query(
       `INSERT INTO shipment_tracking_history (shipment_id, status, status_code, fulfillment_status, location, instructions, event_time, raw_event)
        SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM DUAL WHERE NOT EXISTS (
-         SELECT 1 FROM shipment_tracking_history WHERE shipment_id=? AND status=? AND COALESCE(event_time,'1970-01-01')=COALESCE(?,'1970-01-01') AND COALESCE(location,'')=COALESCE(?,'')
+         SELECT 1 FROM shipment_tracking_history
+         WHERE shipment_id = ?
+           AND ${collationSafeEq("status")}
+           AND COALESCE(event_time, '1970-01-01') = COALESCE(?, '1970-01-01')
+           AND ${collationSafeEq("COALESCE(location, '')")}
        )`,
-      [shipment.id, event.status, event.statusCode || null, mapped, event.location, event.instructions, mysqlDateTime(event.eventTime), asJson(event.raw), shipment.id, event.status, mysqlDateTime(event.eventTime), event.location]
+      [
+        shipment.id,
+        event.status,
+        event.statusCode || null,
+        mapped,
+        event.location,
+        event.instructions,
+        mysqlDateTime(event.eventTime),
+        asJson(event.raw),
+        shipment.id,
+        event.status,
+        mysqlDateTime(event.eventTime),
+        event.location == null ? "" : event.location,
+      ]
     );
     eventsAdded += inserted.rowCount;
   }
-  const ndrReason = next === "ndr" ? (summary.ndrReason || latestEvent?.instructions || null) : shipment.ndr_reason;
+  const flags = buildShipmentStatusFlags(next);
+  const ndrReason = flags.isNdr
+    ? summary.ndrReason || latestEvent?.instructions || null
+    : shipment.ndr_reason;
   if (currentEvent) {
     await query(
       `UPDATE shipments SET fulfillment_status=?, shipment_status=?, shipment_status_code=?, shipment_status_at=COALESCE(?, shipment_status_at), current_location=?, expected_delivery_date=COALESCE(?, expected_delivery_date),
-       last_tracking_update=NOW(), delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at, ?, NOW()) ELSE delivered_at END,
-       ndr_status=CASE WHEN ?='ndr' THEN 'open' ELSE ndr_status END, ndr_reason=?, tracking_response=?, last_error=NULL WHERE id=?`,
-      [next, latestStatus, latestCode, incomingStatusAt, summary.location || latestEvent?.location || null, mysqlDate(summary.expectedDeliveryDate), next, mysqlDateTime(summary.deliveredAt || summary.statusDateTime || latestEvent?.eventTime), next, ndrReason, asJson(data), shipment.id]
+       last_tracking_update=NOW(), delivered_at=CASE WHEN ?=1 THEN COALESCE(delivered_at, ?, NOW()) ELSE delivered_at END,
+       ndr_status=CASE WHEN ?=1 THEN 'open' ELSE ndr_status END, ndr_reason=?, tracking_response=?, last_error=NULL WHERE id=?`,
+      [
+        next,
+        latestStatus,
+        latestCode,
+        incomingStatusAt,
+        summary.location || latestEvent?.location || null,
+        mysqlDate(summary.expectedDeliveryDate),
+        flags.isDelivered,
+        mysqlDateTime(summary.deliveredAt || summary.statusDateTime || latestEvent?.eventTime),
+        flags.isNdr,
+        ndrReason,
+        asJson(data),
+        shipment.id,
+      ]
     );
     await query("UPDATE orders SET fulfillment_status=? WHERE id=?", [next, shipment.order_id]);
     await writeAudit(shipment.id, actorId, "tracking_refreshed", { fulfillment_status: shipment.fulfillment_status }, { fulfillment_status: next });
@@ -615,7 +659,12 @@ export async function refreshActiveTracking(req, res) {
   try {
     const limit = Math.min(50, Math.max(1, Number(req.body?.limit) || 20));
     const found = await query(
-      `SELECT * FROM shipments WHERE waybill_number IS NOT NULL AND fulfillment_status NOT IN ('delivered','cancelled','returned')
+      `SELECT * FROM shipments WHERE waybill_number IS NOT NULL
+       AND fulfillment_status COLLATE utf8mb4_unicode_ci NOT IN (
+         'delivered' COLLATE utf8mb4_unicode_ci,
+         'cancelled' COLLATE utf8mb4_unicode_ci,
+         'returned' COLLATE utf8mb4_unicode_ci
+       )
        AND environment=? AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 15 MINUTE)) ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT ${limit}`,
       [getDelhiveryEnvironment()]
     );

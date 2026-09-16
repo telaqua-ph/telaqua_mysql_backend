@@ -111,6 +111,23 @@ export function isStatusEventCurrent(currentStatusAt, incomingStatusAt) {
   return current === null || incoming >= current;
 }
 
+/**
+ * Numeric flags for SQL CASE expressions — avoids MySQL string IN/= collation mixes
+ * between bound params and string literals (Hostinger: ER_CANT_AGGREGATE_NCOLLATIONS).
+ */
+export function buildShipmentStatusFlags(fulfillmentStatus) {
+  const status = String(fulfillmentStatus || "").toLowerCase();
+  return {
+    markPickedUp: ["picked_up", "in_transit", "out_for_delivery", "delivered"].includes(
+      status
+    )
+      ? 1
+      : 0,
+    isDelivered: status === "delivered" ? 1 : 0,
+    isNdr: status === "ndr" ? 1 : 0,
+  };
+}
+
 export async function persistDelhiveryScanPush(event, databasePool) {
   if (!databasePool?.connect) {
     throw webhookError("DELHIVERY_WEBHOOK_DB_UNAVAILABLE", "Database pool is unavailable.");
@@ -165,6 +182,7 @@ export async function persistDelhiveryScanPush(event, databasePool) {
 
     if (applied) {
       const nextFulfillment = mapped || currentFulfillment;
+      const flags = buildShipmentStatusFlags(nextFulfillment);
       await client.query(
         `UPDATE shipments SET
            fulfillment_status = ?,
@@ -173,14 +191,13 @@ export async function persistDelhiveryScanPush(event, databasePool) {
            shipment_status_at = ?,
            current_location = COALESCE(?, current_location),
            pickup_status = CASE
-             WHEN ? IN ('picked_up','in_transit','out_for_delivery','delivered')
-             THEN 'Picked Up' ELSE pickup_status END,
+             WHEN ? = 1 THEN 'Picked Up' ELSE pickup_status END,
            last_tracking_update = CURRENT_TIMESTAMP,
            delivered_at = CASE
-             WHEN ? = 'delivered' THEN COALESCE(delivered_at, ?, CURRENT_TIMESTAMP)
+             WHEN ? = 1 THEN COALESCE(delivered_at, ?, CURRENT_TIMESTAMP)
              ELSE delivered_at END,
-           ndr_status = CASE WHEN ? = 'ndr' THEN 'open' ELSE ndr_status END,
-           ndr_reason = CASE WHEN ? = 'ndr' THEN COALESCE(?, ndr_reason) ELSE ndr_reason END,
+           ndr_status = CASE WHEN ? = 1 THEN 'open' ELSE ndr_status END,
+           ndr_reason = CASE WHEN ? = 1 THEN COALESCE(?, ndr_reason) ELSE ndr_reason END,
            last_error = NULL
          WHERE id = ?`,
         [
@@ -189,11 +206,11 @@ export async function persistDelhiveryScanPush(event, databasePool) {
           statusCode || null,
           event.statusDateTime,
           event.location,
-          nextFulfillment,
-          nextFulfillment,
+          flags.markPickedUp,
+          flags.isDelivered,
           event.statusDateTime,
-          nextFulfillment,
-          nextFulfillment,
+          flags.isNdr,
+          flags.isNdr,
           event.instructions,
           shipment.id,
         ]

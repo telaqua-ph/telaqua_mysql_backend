@@ -165,10 +165,50 @@ function throwUpstreamError(response, debugMeta, body) {
   const err = new Error(
     upstreamMessage || `Delhivery API returned HTTP ${response.status}`
   );
-  err.code = "DELHIVERY_UPSTREAM_ERROR";
+  err.code =
+    response.status === 429
+      ? "DELHIVERY_THROTTLED"
+      : /data does not exists? for provided waybill/i.test(String(upstreamMessage || ""))
+        ? "DELHIVERY_WAYBILL_NOT_FOUND"
+        : "DELHIVERY_UPSTREAM_ERROR";
   err.status = response.status;
   err.upstreamBody = body;
+  err.retryAfterMs = parseThrottleWaitMs(upstreamMessage, response);
   throw err;
+}
+
+export function parseThrottleWaitMs(message, response = null) {
+  const header =
+    typeof response?.headers?.get === "function"
+      ? response.headers.get("retry-after")
+      : null;
+  if (header && /^\d+$/.test(String(header).trim())) {
+    return Math.min(Number(header) * 1000, 60_000);
+  }
+  const match = /wait\s+(\d+)\s*seconds?/i.exec(String(message || ""));
+  if (match) return Math.min(Number(match[1]) * 1000, 60_000);
+  return 8_000;
+}
+
+export function isDelhiveryWaybillMissingError(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "");
+  return (
+    code === "DELHIVERY_WAYBILL_NOT_FOUND" ||
+    /data does not exists? for provided waybill/i.test(message)
+  );
+}
+
+export function isDelhiveryThrottledError(error) {
+  return (
+    error?.code === "DELHIVERY_THROTTLED" ||
+    Number(error?.status) === 429 ||
+    /throttled|too many requests/i.test(String(error?.message || ""))
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function wrapNetworkError(networkError) {
@@ -187,7 +227,9 @@ function wrapNetworkError(networkError) {
   throw err;
 }
 
-async function delhiveryGet(requestUrl, token, debugMeta = {}) {
+const TRACKING_MAX_ATTEMPTS = 3;
+
+async function delhiveryGetOnce(requestUrl, token, debugMeta = {}) {
   logDelhiveryRequest(requestUrl, token, { ...debugMeta, method: "GET" });
   let response;
   try {
@@ -210,6 +252,33 @@ async function delhiveryGet(requestUrl, token, debugMeta = {}) {
     throw err;
   }
   return body;
+}
+
+async function delhiveryGet(requestUrl, token, debugMeta = {}) {
+  const retryable = debugMeta.api === "shipment_tracking";
+  const maxAttempts = retryable ? TRACKING_MAX_ATTEMPTS : 1;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await delhiveryGetOnce(requestUrl, token, {
+        ...debugMeta,
+        attempt,
+      });
+    } catch (error) {
+      lastError = error;
+      if (!retryable || !isDelhiveryThrottledError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      const waitMs = error.retryAfterMs || parseThrottleWaitMs(error.message);
+      console.warn("Delhivery tracking throttled; backing off", {
+        attempt,
+        waitMs,
+        api: debugMeta.api,
+      });
+      await sleep(waitMs);
+    }
+  }
+  throw lastError;
 }
 
 async function delhiveryPost(requestUrl, token, payload, debugMeta = {}) {
