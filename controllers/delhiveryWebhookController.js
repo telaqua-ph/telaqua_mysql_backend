@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 
 import {
   parseDelhiveryScanPush,
@@ -57,6 +58,7 @@ export function createDelhiveryWebhookHandler(databasePool) {
     try {
       const event = parseDelhiveryScanPush(payload);
       const result = await persistDelhiveryScanPush(event, databasePool);
+      console.log('Delhivery webhook processed', { duplicate: result.duplicate, applied: result.applied });
       return res.status(200).json({
         success: true,
         duplicate: result.duplicate,
@@ -69,10 +71,7 @@ export function createDelhiveryWebhookHandler(databasePool) {
       if (error?.code === "DELHIVERY_WEBHOOK_SHIPMENT_NOT_FOUND") {
         return res.status(404).json({ success: false, message: error.message });
       }
-      console.error("Delhivery webhook processing failed", {
-        code: error?.code,
-        message: error?.message,
-      });
+      console.error("Delhivery webhook processing failed", safeDelhiveryError(error));
       return res.status(500).json({ success: false, message: "Webhook processing failed." });
     }
   };

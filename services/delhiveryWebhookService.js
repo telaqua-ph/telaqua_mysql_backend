@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { withDelhiveryDbStage } from "../lib/delhiveryDbDiagnostics.js";
 import {
   canAdvanceFulfillment,
   mapDelhiveryStatus,
@@ -134,10 +135,12 @@ export async function persistDelhiveryScanPush(event, databasePool) {
   }
   const client = await databasePool.connect();
   try {
-    await client.query("BEGIN");
-    const { rows } = await client.query(
-      "SELECT * FROM shipments WHERE waybill_number = ? LIMIT 1 FOR UPDATE",
-      [event.awb]
+    await withDelhiveryDbStage("webhook.begin", () => client.query("BEGIN"));
+    const { rows } = await withDelhiveryDbStage("webhook.shipment.lock", () =>
+      client.query(
+        "SELECT * FROM shipments WHERE waybill_number = ? LIMIT 1 FOR UPDATE",
+        [event.awb]
+      )
     );
     const shipment = rows[0];
     if (!shipment) {
@@ -148,26 +151,28 @@ export async function persistDelhiveryScanPush(event, databasePool) {
     }
 
     const statusCode = [event.statusType, event.nslCode].filter(Boolean).join(":").slice(0, 60);
-    const inserted = await client.query(
-      `INSERT IGNORE INTO shipment_tracking_history (
-         shipment_id, event_key, event_source, status, status_code,
-         fulfillment_status, location, instructions, event_time, raw_event
-       ) VALUES (?, ?, 'delhivery_webhook', ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        shipment.id,
-        event.eventKey,
-        event.status,
-        statusCode || null,
-        event.fulfillmentStatus,
-        event.location,
-        event.instructions,
-        event.statusDateTime,
-        JSON.stringify(event.raw),
-      ]
+    const inserted = await withDelhiveryDbStage("webhook.history.insert", () =>
+      client.query(
+        `INSERT IGNORE INTO shipment_tracking_history (
+           shipment_id, event_key, event_source, status, status_code,
+           fulfillment_status, location, instructions, event_time, raw_event
+         ) VALUES (?, ?, 'delhivery_webhook', ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          shipment.id,
+          event.eventKey,
+          event.status,
+          statusCode || null,
+          event.fulfillmentStatus,
+          event.location,
+          event.instructions,
+          event.statusDateTime,
+          JSON.stringify(event.raw),
+        ]
+      )
     );
 
     if (inserted.rowCount === 0) {
-      await client.query("COMMIT");
+      await withDelhiveryDbStage("webhook.commit", () => client.query("COMMIT"));
       return { shipmentId: shipment.id, orderId: shipment.order_id, duplicate: true, applied: false };
     }
 
@@ -183,64 +188,70 @@ export async function persistDelhiveryScanPush(event, databasePool) {
     if (applied) {
       const nextFulfillment = mapped || currentFulfillment;
       const flags = buildShipmentStatusFlags(nextFulfillment);
-      await client.query(
-        `UPDATE shipments SET
-           fulfillment_status = ?,
-           shipment_status = ?,
-           shipment_status_code = ?,
-           shipment_status_at = ?,
-           current_location = COALESCE(?, current_location),
-           pickup_status = CASE
-             WHEN ? = 1 THEN 'Picked Up' ELSE pickup_status END,
-           last_tracking_update = CURRENT_TIMESTAMP,
-           delivered_at = CASE
-             WHEN ? = 1 THEN COALESCE(delivered_at, ?, CURRENT_TIMESTAMP)
-             ELSE delivered_at END,
-           ndr_status = CASE WHEN ? = 1 THEN 'open' ELSE ndr_status END,
-           ndr_reason = CASE WHEN ? = 1 THEN COALESCE(?, ndr_reason) ELSE ndr_reason END,
-           last_error = NULL
-         WHERE id = ?`,
-        [
-          nextFulfillment,
-          event.status,
-          statusCode || null,
-          event.statusDateTime,
-          event.location,
-          flags.markPickedUp,
-          flags.isDelivered,
-          event.statusDateTime,
-          flags.isNdr,
-          flags.isNdr,
-          event.instructions,
-          shipment.id,
-        ]
+      await withDelhiveryDbStage("webhook.shipment.update", () =>
+        client.query(
+          `UPDATE shipments SET
+             fulfillment_status = ?,
+             shipment_status = ?,
+             shipment_status_code = ?,
+             shipment_status_at = ?,
+             current_location = COALESCE(?, current_location),
+             pickup_status = CASE
+               WHEN ? = 1 THEN 'Picked Up' ELSE pickup_status END,
+             last_tracking_update = CURRENT_TIMESTAMP,
+             delivered_at = CASE
+               WHEN ? = 1 THEN COALESCE(delivered_at, ?, CURRENT_TIMESTAMP)
+               ELSE delivered_at END,
+             ndr_status = CASE WHEN ? = 1 THEN 'open' ELSE ndr_status END,
+             ndr_reason = CASE WHEN ? = 1 THEN COALESCE(?, ndr_reason) ELSE ndr_reason END,
+             last_error = NULL
+           WHERE id = ?`,
+          [
+            nextFulfillment,
+            event.status,
+            statusCode || null,
+            event.statusDateTime,
+            event.location,
+            flags.markPickedUp,
+            flags.isDelivered,
+            event.statusDateTime,
+            flags.isNdr,
+            flags.isNdr,
+            event.instructions,
+            shipment.id,
+          ]
+        )
       );
-      await client.query(
-        "UPDATE orders SET fulfillment_status = ? WHERE id = ?",
-        [nextFulfillment, shipment.order_id]
+      await withDelhiveryDbStage("webhook.order.update", () =>
+        client.query(
+          "UPDATE orders SET fulfillment_status = ? WHERE id = ?",
+          [nextFulfillment, shipment.order_id]
+        )
       );
-      await client.query(
-        `INSERT INTO shipment_audit_log (
-           shipment_id, admin_id, action, before_data, after_data
-         ) VALUES (?, NULL, 'webhook_status_received', ?, ?)`,
-        [
-          shipment.id,
-          JSON.stringify({
-            fulfillment_status: currentFulfillment,
-            shipment_status: shipment.shipment_status,
-            shipment_status_at: shipment.shipment_status_at,
-          }),
-          JSON.stringify({
-            fulfillment_status: nextFulfillment,
-            shipment_status: event.status,
-            shipment_status_at: event.statusDateTime,
-            event_key: event.eventKey,
-          }),
-        ]
+      await withDelhiveryDbStage("webhook.audit.insert", () =>
+        client.query(
+          `INSERT INTO shipment_audit_log (
+             shipment_id, admin_id, action, before_data, after_data
+           ) VALUES (?, NULL, 'webhook_status_received', ?, ?)`,
+          [
+            shipment.id,
+            JSON.stringify({
+              fulfillment_status: currentFulfillment,
+              shipment_status: shipment.shipment_status,
+              shipment_status_at: shipment.shipment_status_at,
+            }),
+            JSON.stringify({
+              fulfillment_status: nextFulfillment,
+              shipment_status: event.status,
+              shipment_status_at: event.statusDateTime,
+              event_key: event.eventKey,
+            }),
+          ]
+        )
       );
     }
 
-    await client.query("COMMIT");
+    await withDelhiveryDbStage("webhook.commit", () => client.query("COMMIT"));
     return {
       shipmentId: shipment.id,
       orderId: shipment.order_id,

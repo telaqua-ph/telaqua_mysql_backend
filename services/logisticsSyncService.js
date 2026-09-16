@@ -78,6 +78,7 @@ async function runTrackingSync() {
             shipmentId: shipment.id,
             message: error?.message,
             code: error?.code,
+            stage: error?.queryStage || null,
           });
         }
       }
@@ -85,6 +86,11 @@ async function runTrackingSync() {
       if (i < rows.length - 1 && delay > 0) {
         await sleep(delay);
       }
+    }
+    if (rows.length) {
+      console.log("Scheduled Delhivery tracking processed", {
+        attempted: rows.length,
+      });
     }
   } catch (error) {
     console.error("Scheduled Delhivery tracking sync failed", {
@@ -95,6 +101,8 @@ async function runTrackingSync() {
     running = false;
   }
 }
+
+export { runTrackingSync };
 
 export function startLogisticsTrackingSync() {
   if (String(process.env.DELHIVERY_TRACKING_SYNC_ENABLED || "").toLowerCase() !== "true") {

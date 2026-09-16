@@ -31,6 +31,7 @@ import {
 } from "../services/delhiveryWebhookService.js";
 import { canFulfillOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
+import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -88,6 +89,27 @@ function assertDelhiveryAccepted(payload, operation) {
 /** Collation-safe string compare for Hostinger MySQL (unicode_ci vs bin params). */
 export function collationSafeEq(columnSql, paramPlaceholder = "?") {
   return `(${columnSql}) COLLATE utf8mb4_unicode_ci = CONVERT(${paramPlaceholder} USING utf8mb4) COLLATE utf8mb4_unicode_ci`;
+}
+
+/**
+ * Temporal equality that avoids string COALESCE(date, '1970-01-01') = COALESCE(?, ...).
+ * That pattern mixes utf8mb4_unicode_ci literals with utf8mb4_bin derived params
+ * (ER_CANT_AGGREGATE_2COLLATIONS on Hostinger/MariaDB).
+ * NULL-safe: NULL <=> NULL is true; real epoch remains distinct from NULL.
+ */
+export function collationSafeEventTimeEq(columnSql = "event_time", paramPlaceholder = "?") {
+  return `${columnSql} <=> CAST(${paramPlaceholder} AS DATETIME)`;
+}
+
+async function runLogisticsQuery(stage, sql, params = [], client = { query }) {
+  try {
+    return await client.query(sql, params);
+  } catch (error) {
+    error.queryStage = stage;
+    // Prefer sanitized diagnostics: never echo SQL text, params, or sqlMessage.
+    console.error("Logistics SQL failed", safeDelhiveryError(error));
+    throw error;
+  }
 }
 
 function findResponseValue(payload, keys, depth = 0) {
@@ -581,14 +603,16 @@ async function refreshOneShipment(inputShipment, actorId = null) {
   let eventsAdded = 0;
   for (const event of events) {
     const mapped = mapDelhiveryStatus(event.status, event.statusCode);
-    const inserted = await query(
+    const eventTime = mysqlDateTime(event.eventTime);
+    const inserted = await runLogisticsQuery(
+      "tracking.history.deduplicate",
       `INSERT INTO shipment_tracking_history (shipment_id, status, status_code, fulfillment_status, location, instructions, event_time, raw_event)
        SELECT ?, ?, ?, ?, ?, ?, ?, ? FROM DUAL WHERE NOT EXISTS (
          SELECT 1 FROM shipment_tracking_history
          WHERE shipment_id = ?
            AND ${collationSafeEq("status")}
-           AND COALESCE(event_time, '1970-01-01') = COALESCE(?, '1970-01-01')
-           AND ${collationSafeEq("COALESCE(location, '')")}
+           AND ${collationSafeEventTimeEq("event_time")}
+           AND ${collationSafeEq("CONVERT(IFNULL(location, '') USING utf8mb4)")}
        )`,
       [
         shipment.id,
@@ -597,11 +621,11 @@ async function refreshOneShipment(inputShipment, actorId = null) {
         mapped,
         event.location,
         event.instructions,
-        mysqlDateTime(event.eventTime),
+        eventTime,
         asJson(event.raw),
         shipment.id,
         event.status,
-        mysqlDateTime(event.eventTime),
+        eventTime,
         event.location == null ? "" : event.location,
       ]
     );
@@ -612,7 +636,8 @@ async function refreshOneShipment(inputShipment, actorId = null) {
     ? summary.ndrReason || latestEvent?.instructions || null
     : shipment.ndr_reason;
   if (currentEvent) {
-    await query(
+    await runLogisticsQuery(
+      "tracking.shipment.update",
       `UPDATE shipments SET fulfillment_status=?, shipment_status=?, shipment_status_code=?, shipment_status_at=COALESCE(?, shipment_status_at), current_location=?, expected_delivery_date=COALESCE(?, expected_delivery_date),
        last_tracking_update=NOW(), delivered_at=CASE WHEN ?=1 THEN COALESCE(delivered_at, ?, NOW()) ELSE delivered_at END,
        ndr_status=CASE WHEN ?=1 THEN 'open' ELSE ndr_status END, ndr_reason=?, tracking_response=?, last_error=NULL WHERE id=?`,
@@ -631,15 +656,46 @@ async function refreshOneShipment(inputShipment, actorId = null) {
         shipment.id,
       ]
     );
-    await query("UPDATE orders SET fulfillment_status=? WHERE id=?", [next, shipment.order_id]);
-    await writeAudit(shipment.id, actorId, "tracking_refreshed", { fulfillment_status: shipment.fulfillment_status }, { fulfillment_status: next });
+    await runLogisticsQuery(
+      "tracking.order.update",
+      "UPDATE orders SET fulfillment_status=? WHERE id=?",
+      [next, shipment.order_id]
+    );
+    await runLogisticsQuery(
+      "tracking.audit.insert",
+      "INSERT INTO shipment_audit_log (shipment_id, admin_id, action, before_data, after_data) VALUES (?, ?, ?, ?, ?)",
+      [
+        shipment.id,
+        actorId || null,
+        "tracking_refreshed",
+        asJson({ fulfillment_status: shipment.fulfillment_status }),
+        asJson({ fulfillment_status: next }),
+      ]
+    );
   } else {
-    await query(
+    await runLogisticsQuery(
+      "tracking.stale.update",
       "UPDATE shipments SET last_tracking_update=NOW(), tracking_response=?, last_error=NULL WHERE id=?",
       [asJson(data), shipment.id]
     );
   }
   return { data, status: currentEvent ? latestStatus : shipment.shipment_status, fulfillment_status: next, events_added: eventsAdded, stale_ignored: !currentEvent };
+  } catch (error) {
+    // Upstream courier outcomes are classified by the scheduler; only annotate
+    // unexpected failures that lack a more specific SQL stage.
+    const upstream =
+      error?.code === "DELHIVERY_WAYBILL_NOT_FOUND" ||
+      error?.code === "DELHIVERY_UPSTREAM_ERROR" ||
+      error?.code === "DELHIVERY_THROTTLED" ||
+      error?.code === "DELHIVERY_INVALID_RESPONSE";
+    if (!error.queryStage && !upstream) {
+      error.queryStage = "tracking.refresh";
+      console.error("Logistics tracking refresh failed", {
+        ...safeDelhiveryError(error),
+        shipmentId: shipment?.id || null,
+      });
+    }
+    throw error;
   } finally {
     await releaseShipmentOperation(shipment.id, locked.token);
   }

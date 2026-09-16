@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   collationSafeEq,
+  collationSafeEventTimeEq,
 } from "../controllers/logisticsController.js";
 import {
   isDelhiveryThrottledError,
@@ -17,8 +18,15 @@ test("collationSafeEq wraps both sides for unicode_ci comparison", () => {
   assert.match(sql, /CONVERT\(\? USING utf8mb4\)/);
   assert.match(sql, /^\(status\)/);
 
-  const loc = collationSafeEq("COALESCE(location, '')");
-  assert.match(loc, /COALESCE\(location, ''\)/);
+  const loc = collationSafeEq("CONVERT(IFNULL(location, '') USING utf8mb4)");
+  assert.match(loc, /IFNULL\(location, ''\)/);
+});
+
+test("collationSafeEventTimeEq uses typed NULL-safe datetime compare", () => {
+  const sql = collationSafeEventTimeEq();
+  assert.equal(sql, "event_time <=> CAST(? AS DATETIME)");
+  assert.doesNotMatch(sql, /COALESCE/);
+  assert.doesNotMatch(sql, /1970-01-01/);
 });
 
 test("tracking status flags avoid string CASE literals", () => {

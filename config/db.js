@@ -9,6 +9,7 @@
  */
 
 import mysql from "mysql2/promise";
+import { logDelhiveryDbError } from "../lib/delhiveryDbDiagnostics.js";
 
 const dbHost = (process.env.DB_HOST || "").trim();
 const dbName = (process.env.DB_NAME || "").trim();
@@ -51,8 +52,13 @@ function normalizeExecuteResult(result) {
 }
 
 async function executeOn(connection, sql, params = []) {
-  const [result] = await connection.execute(sql, params);
-  return normalizeExecuteResult(result);
+  try {
+    const [result] = await connection.execute(sql, params);
+    return normalizeExecuteResult(result);
+  } catch (error) {
+    logDelhiveryDbError(error);
+    throw error;
+  }
 }
 
 function wrapConnection(rawConnection) {
@@ -92,8 +98,7 @@ export async function query(text, params = []) {
     err.code = "DB_CONFIG_ERROR";
     throw err;
   }
-  const [result] = await mysqlPool.execute(text, params);
-  return normalizeExecuteResult(result);
+  return executeOn(mysqlPool, text, params);
 }
 
 /** pg-compatible pool facade */

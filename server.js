@@ -8,6 +8,7 @@
 import "dotenv/config";
 import app from "./app.js";
 import { isDatabaseConfigured } from "./config/db.js";
+import { buildIdentity } from "./lib/buildIdentity.js";
 import { startLogisticsTrackingSync, stopLogisticsTrackingSync } from "./services/logisticsSyncService.js";
 import { startCheckoutReminderSync, stopCheckoutReminderSync } from "./services/checkoutReminderService.js";
 import { startOrderPushWorker, stopOrderPushWorker } from "./services/orderPushWorker.js";
@@ -17,6 +18,12 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 
 function logSafeStartupInfo() {
+  let identity = { commit: null, sourceFingerprint: null };
+  try {
+    identity = buildIdentity();
+  } catch {
+    /* Fingerprint is best-effort; do not block startup. */
+  }
   console.log("Startup:", {
     node: process.version,
     env: process.env.NODE_ENV || "development",
@@ -30,6 +37,8 @@ function logSafeStartupInfo() {
     delhiveryConfigured: Boolean(process.env.DELHIVERY_API_TOKEN),
     delhiveryEnv: process.env.DELHIVERY_ENV || "(not set)",
     webPushConfigured: isWebPushConfigured(),
+    commit: identity.commit,
+    sourceFingerprint: identity.sourceFingerprint,
   });
 }
 
