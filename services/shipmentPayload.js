@@ -4,6 +4,8 @@
  * Razorpay vs COD differs only by payment_mode and cod_amount.
  */
 
+import { DELHIVERY_SHIPPING_MODE } from "../config/delhiveryConfig.js";
+
 const clean = (value) =>
   String(value ?? "")
     .replace(/[&#%;\\]/g, " ")
@@ -28,6 +30,7 @@ export function buildShipmentPayload(order, shipment, warehouse, product) {
     phone: String(order.phone),
     order: String(order.order_number || order.id),
     payment_mode: paymentMode,
+    shipping_mode: DELHIVERY_SHIPPING_MODE,
     products_desc: clean(product?.name) || "Tel-Aqua Product",
     quantity: String(quantity),
     total_amount: totalAmount,

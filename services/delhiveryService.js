@@ -8,7 +8,11 @@
  * Token and URLs from process.env only — never hardcoded or fully logged.
  */
 
-import { getDelhiveryToken, getDelhiveryUrl } from "../config/delhiveryConfig.js";
+import {
+  DELHIVERY_TRANSPORT_MODE_CODE,
+  getDelhiveryToken,
+  getDelhiveryUrl,
+} from "../config/delhiveryConfig.js";
 
 function getDelhiveryApiToken() {
   return getDelhiveryToken();
@@ -362,7 +366,7 @@ export async function checkPincodeServiceability(pincode) {
 export async function getExpectedTat(params) {
   const token = requireToken();
   const { env, baseUrl } = getTatBaseUrl();
-  return delhiveryGet(buildExpectedTatUrl(baseUrl, params), token, {
+  return delhiveryGet(buildExpectedTatUrl(baseUrl, { ...params, mot: DELHIVERY_TRANSPORT_MODE_CODE }), token, {
     api: "expected_tat",
     env,
   });
@@ -380,7 +384,7 @@ export async function getShippingRate(params) {
   const token = requireToken();
   const { env, baseUrl } = getRateBaseUrl();
   const url = new URL(baseUrl);
-  url.searchParams.set("md", params.md);
+  url.searchParams.set("md", DELHIVERY_TRANSPORT_MODE_CODE);
   url.searchParams.set("cgm", String(params.cgm));
   url.searchParams.set("o_pin", params.o_pin);
   url.searchParams.set("d_pin", params.d_pin);

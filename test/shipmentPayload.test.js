@@ -82,6 +82,7 @@ test("getTelaquaProductDefaults reads Hostinger length/width/height env keys", (
 test("Razorpay shipment payload includes package details and no cod_amount", () => {
   const item = buildShipmentPayload(prepaidOrder, shipment, warehouse, product).shipments[0];
   assert.equal(item.payment_mode, "Pre-paid");
+  assert.equal(item.shipping_mode, "Express");
   assert.equal(item.cod_amount, undefined);
   assert.equal(item.products_desc, "Tel-Aqua Product");
   assert.equal(item.quantity, "1");
@@ -98,6 +99,7 @@ test("Razorpay shipment payload includes package details and no cod_amount", () 
 test("COD shipment payload includes the same package details plus cod_amount", () => {
   const item = buildShipmentPayload(codOrder, shipment, warehouse, product).shipments[0];
   assert.equal(item.payment_mode, "COD");
+  assert.equal(item.shipping_mode, "Express");
   assert.equal(item.cod_amount, "1898");
   assert.equal(item.products_desc, "Tel-Aqua Product");
   assert.equal(item.quantity, "1");

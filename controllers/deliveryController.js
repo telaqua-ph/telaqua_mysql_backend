@@ -22,6 +22,10 @@ import {
 } from "../services/delhiveryService.js";
 import { isMissingColumnError } from "../lib/dbErrors.js";
 import { query } from "../config/db.js";
+import {
+  DELHIVERY_SHIPPING_MODE,
+  DELHIVERY_TRANSPORT_MODE_CODE,
+} from "../config/delhiveryConfig.js";
 
 /** Sensible upper bound for bulk waybill requests. */
 const MAX_WAYBILL_COUNT = 100;
@@ -395,6 +399,7 @@ function buildShipmentPayload(order, config, paymentMode) {
     phone: String(order.phone).trim(),
     order: String(order.order_number).trim(),
     payment_mode: paymentMode,
+    shipping_mode: DELHIVERY_SHIPPING_MODE,
     products_desc: config.productName,
     quantity: String(quantity),
     total_amount: totalAmount,
@@ -977,11 +982,7 @@ export async function checkTat(req, res) {
   try {
     const origin_pin = String(req.query.origin_pin ?? "").trim();
     const destination_pin = String(req.query.destination_pin ?? "").trim();
-    const motRaw = req.query.mot;
-    const mot =
-      motRaw === undefined || motRaw === null || String(motRaw).trim() === ""
-        ? "S"
-        : String(motRaw).trim().toUpperCase();
+    const mot = DELHIVERY_TRANSPORT_MODE_CODE;
 
     if (!origin_pin || !/^\d{6}$/.test(origin_pin)) {
       return res.status(400).json({
@@ -1054,18 +1055,13 @@ export async function fetchWaybills(req, res) {
  */
 export async function calculateRate(req, res) {
   try {
-    const md = String(req.query.md ?? "").trim().toUpperCase();
+    const md = DELHIVERY_TRANSPORT_MODE_CODE;
     const cgmRaw = String(req.query.cgm ?? "").trim();
     const o_pin = String(req.query.o_pin ?? "").trim();
     const d_pin = String(req.query.d_pin ?? "").trim();
     const ss = String(req.query.ss ?? "").trim();
 
-    if (!md || !ALLOWED_MD.includes(md)) {
-      return res.status(400).json({
-        success: false,
-        message: `Invalid md. Allowed values: ${ALLOWED_MD.join(", ")}`,
-      });
-    }
+    if (!ALLOWED_MD.includes(md)) throw new Error("Invalid Express rate mode configuration");
     if (!cgmRaw || !/^\d+$/.test(cgmRaw)) {
       return res.status(400).json({
         success: false,

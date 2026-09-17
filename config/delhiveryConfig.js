@@ -11,6 +11,9 @@ const OPERATIONS = Object.freeze({
   ndr: "NDR_URL",
 });
 
+export const DELHIVERY_SHIPPING_MODE = "Express";
+export const DELHIVERY_TRANSPORT_MODE_CODE = "E";
+
 function configError(message) {
   const error = new Error(message);
   error.code = "DELHIVERY_CONFIG_ERROR";

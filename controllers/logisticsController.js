@@ -6,6 +6,7 @@ import {
   getSafeDelhiveryConfig,
   getTelaquaProductDefaults,
   getTelaquaWarehouse,
+  DELHIVERY_TRANSPORT_MODE_CODE,
 } from "../config/delhiveryConfig.js";
 import {
   checkPincodeServiceability,
@@ -377,7 +378,7 @@ export async function checkTat(req, res) {
       if (!await orderById(orderId)) return res.status(404).json({ success: false, message: "Order not found." });
       shipment = await ensureShipment(orderId);
     }
-    const data = await getExpectedTat({ origin_pin: warehouse.pincode, destination_pin: destination, mot: clean(body.mot || "S") });
+    const data = await getExpectedTat({ origin_pin: warehouse.pincode, destination_pin: destination, mot: DELHIVERY_TRANSPORT_MODE_CODE });
     assertDelhiveryAccepted(data, "tat");
     const edd = findResponseValue(data, ["expected_delivery_date", "ExpectedDeliveryDate", "edd", "EDD"]);
     const tat = findResponseValue(data, ["tat", "TAT", "days", "transit_days", "expected_tat"]);
@@ -407,7 +408,7 @@ export async function calculateRate(req, res) {
       shipment = await ensureShipment(orderId);
     }
     const weight = Number(body.cgm || defaults.weightGm);
-    const data = await getShippingRate({ md: body.md || "S", cgm: weight, o_pin: warehouse.pincode, d_pin: destination, ss: body.ss || "Delivered" });
+    const data = await getShippingRate({ md: DELHIVERY_TRANSPORT_MODE_CODE, cgm: weight, o_pin: warehouse.pincode, d_pin: destination, ss: body.ss || "Delivered" });
     assertDelhiveryAccepted(data, "rate");
     const charge = Number(findResponseValue(data, ["total_amount", "gross_amount", "total", "charge", "amount"]));
     if (!Number.isFinite(charge)) {
