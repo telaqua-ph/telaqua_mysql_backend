@@ -23,7 +23,7 @@ import {
   resolveOrderPricing,
 } from "../services/orderPricing.js";
 import { normalizePromoCode } from "../services/promoService.js";
-import { deriveOrderDisplayStatus } from "../services/orderDisplayStatus.js";
+import { deriveOrderConfirmationStatus } from "../services/orderDisplayStatus.js";
 import { deriveShipmentStatusDisplay } from "../services/shipmentStatusDisplay.js";
 import {
   isCodOrder,
@@ -118,7 +118,9 @@ function withDisplayStatuses(order) {
   const normalized = withNormalizedPaymentMode(order);
   return {
     ...normalized,
-    display_status: deriveOrderDisplayStatus(normalized),
+    // This is a presentation-only confirmation label. Persisted order_status
+    // and fulfillment_status remain available for lifecycle/detail views.
+    confirmation_status: deriveOrderConfirmationStatus(normalized),
     shipment_status_display: deriveShipmentStatusDisplay(normalized),
     shipment_status_updated_at:
       normalized.tracking_status_at ||

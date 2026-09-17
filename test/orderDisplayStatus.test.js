@@ -1,94 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveOrderDisplayStatus } from "../services/orderDisplayStatus.js";
+import { deriveOrderConfirmationStatus } from "../services/orderDisplayStatus.js";
+import { deriveShipmentStatusDisplay } from "../services/shipmentStatusDisplay.js";
 
-test("unpaid orders do not receive a shipping display status", () => {
-  assert.equal(deriveOrderDisplayStatus({ payment_status: "Pending" }), null);
-  assert.equal(
-    deriveOrderDisplayStatus({ payment_status: "Failed", waybill: "123456789" }),
-    null
-  );
+test("new orders remain new regardless of payment or shipment fields", () => {
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "New", payment_status: "Pending" }), "New");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "New", payment_status: "Failed", waybill: "123456789" }), "New");
 });
 
-test("paid orders without a shipment are ready to ship", () => {
-  assert.equal(
-    deriveOrderDisplayStatus({ payment_status: "Paid" }),
-    "READY_TO_SHIP"
-  );
+test("the existing payment confirmation flow is confirmed", () => {
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Confirmed", payment_status: "Paid" }), "Confirmed");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Unknown legacy value", payment_status: "Paid" }), "Confirmed");
 });
 
-test("paid orders with a shipment or AWB are ready to pickup", () => {
-  assert.equal(
-    deriveOrderDisplayStatus({ payment_status: "Paid", waybill: "123456789" }),
-    "READY_TO_PICKUP"
-  );
-  assert.equal(
-    deriveOrderDisplayStatus({
-      payment_status: "Paid",
-      delhivery_shipment_id: "SHIP-42",
-    }),
-    "READY_TO_PICKUP"
-  );
+test("known fulfillment-like legacy order statuses map to confirmed", () => {
+  for (const order_status of ["Ready to Ship", "Ready to Pickup", "Shipped", "In Transit", "Out for Delivery", "Delivered"]) {
+    assert.equal(deriveOrderConfirmationStatus({ order_status, payment_status: "Pending" }), "Confirmed", order_status);
+  }
 });
 
-test("stored Delhivery pickup and transit statuses display in transit", () => {
-  assert.equal(
-    deriveOrderDisplayStatus({
-      payment_status: "Paid",
-      waybill: "123456789",
-      tracking_status: "Picked Up",
-    }),
-    "IN_TRANSIT"
-  );
-  assert.equal(
-    deriveOrderDisplayStatus({
-      payment_status: "Paid",
-      waybill: "123456789",
-      tracking_status: "In Transit",
-    }),
-    "IN_TRANSIT"
-  );
+test("shipment progress never changes the confirmation label", () => {
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Confirmed", tracking_status: "Delivered" }), "Confirmed");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "New", tracking_status: "Delivered" }), "New");
 });
 
-test("stored Delhivery out-for-delivery and delivered statuses take precedence", () => {
-  assert.equal(
-    deriveOrderDisplayStatus({
-      payment_status: "Paid",
-      waybill: "123456789",
-      tracking_status: "Dispatched for Delivery",
-    }),
-    "OUT_FOR_DELIVERY"
-  );
-  assert.equal(
-    deriveOrderDisplayStatus({
-      payment_status: "Paid",
-      waybill: "123456789",
-      tracking_status: "Delivered",
-    }),
-    "DELIVERED"
-  );
+test("unknown exceptional statuses are not blindly mapped to confirmed", () => {
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Cancelled", payment_status: "Failed" }), "New");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Returned", payment_status: "Pending" }), "New");
 });
 
-test("fulfillment status alone cannot fabricate a tracked delivery state", () => {
-  assert.equal(
-    deriveOrderDisplayStatus({
-      payment_status: "Paid",
-      waybill: "123456789",
-      fulfillment_status: "delivered",
-      tracking_status: null,
-    }),
-    "READY_TO_PICKUP"
-  );
-});
-
-test("an undelivered tracking result is never treated as delivered", () => {
-  assert.equal(
-    deriveOrderDisplayStatus({
-      payment_status: "Paid",
-      waybill: "123456789",
-      tracking_status: "Undelivered",
-    }),
-    "READY_TO_PICKUP"
-  );
+test("the reported Orders-page examples keep confirmation and shipment separate", () => {
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Confirmed", payment_status: "Pending" }), "Confirmed", "TAQ-000663");
+  assert.equal(deriveShipmentStatusDisplay({ payment_status: "Pending", fulfillment_status: "shipment_created" }), "Ready to Pickup", "TAQ-000663 shipment");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Ready to Ship", payment_status: "Paid" }), "Confirmed", "TAQ-000662");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "New", payment_status: "Failed", fulfillment_status: "shipment_created" }), "New", "TAQ-000661");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Confirmed", payment_status: "Paid", tracking_status: "Delivered" }), "Confirmed", "delivered confirmation");
+  assert.equal(deriveShipmentStatusDisplay({ payment_status: "Paid", tracking_status: "Delivered" }), "Delivered", "delivered shipment");
 });

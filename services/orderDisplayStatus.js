@@ -1,36 +1,47 @@
-import { mapDelhiveryStatus } from "./logisticsState.js";
+/**
+ * The Orders-list confirmation label is intentionally independent of payment
+ * and shipment progress.  Do not use tracking, waybill, or fulfillment fields
+ * here: shipment updates must not change whether an order is confirmed.
+ */
+const CONFIRMED_ORDER_STATUSES = new Set([
+  "confirmed",
+  "processing",
+  "ready to ship",
+  "ready_to_ship",
+  "ready to pickup",
+  "ready_to_pickup",
+  "shipped",
+  "in transit",
+  "in_transit",
+  "out for delivery",
+  "out_for_delivery",
+  "delivered",
+  "completed",
+  "fulfilled",
+]);
 
-function hasValue(value) {
-  return value !== null && value !== undefined && String(value).trim() !== "";
-}
+const NEW_ORDER_STATUSES = new Set(["", "new", "pending"]);
 
 /**
- * Derive the admin Orders-table status from persisted order and Delhivery data.
- * Tracking-derived states intentionally use only the stored tracking status/code.
+ * Derive the two-state display label without changing the persisted lifecycle
+ * status. Legacy fulfillment-like order statuses are known post-confirmation
+ * states. Other unrecognised/exceptional values are not promoted to Confirmed;
+ * a successful payment is the only additional confirmation proof.
  */
-export function deriveOrderDisplayStatus(order) {
-  if (String(order?.payment_status || "").trim().toLowerCase() !== "paid") {
-    return null;
-  }
+export function deriveOrderConfirmationStatus(order) {
+  const orderStatus = String(order?.order_status || order?.status || "")
+    .trim()
+    .toLowerCase();
 
-  const trackingStatus = String(order?.tracking_status || "").trim();
-  const trackingCode = String(
-    order?.shipment_status_code || order?.tracking_status_code || ""
-  ).trim();
-  const trackedState = mapDelhiveryStatus(trackingStatus, trackingCode);
-  const explicitlyUndelivered = /undelivered|not delivered/i.test(trackingStatus);
+  if (CONFIRMED_ORDER_STATUSES.has(orderStatus)) return "Confirmed";
+  if (NEW_ORDER_STATUSES.has(orderStatus)) return "New";
 
-  if (trackedState === "delivered" && !explicitlyUndelivered) return "DELIVERED";
-  if (trackedState === "out_for_delivery") return "OUT_FOR_DELIVERY";
-  if (trackedState === "picked_up" || trackedState === "in_transit") {
-    return "IN_TRANSIT";
-  }
-
-  const shipmentExists = [
-    order?.waybill,
-    order?.delhivery_shipment_id,
-    order?.shipment_created_at,
-  ].some(hasValue);
-
-  return shipmentExists ? "READY_TO_PICKUP" : "READY_TO_SHIP";
+  return String(order?.payment_status || order?.paymentStatus || "")
+    .trim()
+    .toLowerCase() === "paid"
+    ? "Confirmed"
+    : "New";
 }
+
+// Kept as an export alias for callers during the API transition.
+export const deriveOrderDisplayStatus = deriveOrderConfirmationStatus;
