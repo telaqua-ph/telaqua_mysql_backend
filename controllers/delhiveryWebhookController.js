@@ -55,10 +55,28 @@ export function createDelhiveryWebhookHandler(databasePool) {
       return res.status(400).json({ success: false, message: "Invalid JSON payload." });
     }
 
+    let event;
     try {
-      const event = parseDelhiveryScanPush(payload);
+      event = parseDelhiveryScanPush(payload);
       const result = await persistDelhiveryScanPush(event, databasePool);
-      console.log('Delhivery webhook processed', { duplicate: result.duplicate, applied: result.applied });
+      const reason = result.duplicate
+        ? "DUPLICATE_EVENT"
+        : result.applied
+          ? "APPLIED"
+          : result.stale
+            ? "STALE_EVENT"
+            : result.regressionBlocked
+              ? "PROGRESSION_BLOCKED"
+              : "NOT_APPLIED";
+      console.log("Delhivery webhook processed", {
+        awb: event.awb,
+        matchedShipmentId: result.shipmentId ?? null,
+        parsedStatus: event.status,
+        eventTimestamp: event.statusDateTime,
+        duplicate: result.duplicate,
+        applied: result.applied,
+        reason,
+      });
       return res.status(200).json({
         success: true,
         duplicate: result.duplicate,
@@ -69,6 +87,15 @@ export function createDelhiveryWebhookHandler(databasePool) {
         return res.status(400).json({ success: false, message: error.message });
       }
       if (error?.code === "DELHIVERY_WEBHOOK_SHIPMENT_NOT_FOUND") {
+        console.warn("Delhivery webhook processed", {
+          awb: event?.awb ?? null,
+          matchedShipmentId: null,
+          parsedStatus: event?.status ?? null,
+          eventTimestamp: event?.statusDateTime ?? null,
+          duplicate: false,
+          applied: false,
+          reason: "AWB_NOT_FOUND",
+        });
         return res.status(404).json({ success: false, message: error.message });
       }
       console.error("Delhivery webhook processing failed", safeDelhiveryError(error));

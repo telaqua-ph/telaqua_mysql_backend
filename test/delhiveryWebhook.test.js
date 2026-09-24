@@ -244,6 +244,16 @@ test("derives persisted admin labels without frontend-only state", () => {
     deriveShipmentStatusDisplay({ tracking_status: "In Transit", shipment_status_code: "RT" }),
     "RTO In-Transit"
   );
+  assert.equal(
+    deriveShipmentStatusDisplay({
+      payment_status: "Paid",
+      fulfillment_status: "shipment_created",
+      shipment_status: "Success",
+      waybill: "66637810000604",
+    }),
+    "Ready to Pickup",
+    "shipment-creation acknowledgement is not a courier tracking status"
+  );
 });
 
 test("webhook handler validates the configured header and returns Delhivery's expected 200", async () => {

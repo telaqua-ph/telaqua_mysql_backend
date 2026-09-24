@@ -19,10 +19,20 @@ function hasValue(value) {
   return value !== null && value !== undefined && String(value).trim() !== "";
 }
 
+// Delhivery's create-shipment API can acknowledge a successful request with
+// `Success`.  That is not a courier scan and must never be presented as one.
+function isCreationAcknowledgement(value) {
+  return /^(success|created|shipment created)$/i.test(String(value || "").trim());
+}
+
 export function deriveShipmentStatusDisplay(order) {
-  const rawStatus = String(
-    order?.tracking_status || order?.shipment_status || ""
-  ).trim();
+  const trackingStatus = String(order?.tracking_status || "").trim();
+  const shipmentStatus = String(order?.shipment_status || "").trim();
+  const rawStatus = !isCreationAcknowledgement(trackingStatus)
+    ? trackingStatus
+    : !isCreationAcknowledgement(shipmentStatus)
+      ? shipmentStatus
+      : "";
   const statusCode = String(
     order?.shipment_status_code || order?.tracking_status_code || ""
   ).trim();
