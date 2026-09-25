@@ -104,11 +104,11 @@ export function isPromoWithinUsageLimit(row) {
 const RETIRED_OFFER_CODES = ["WELCOME25", "SAVE500"];
 
 /** Preferred Website / Direct public coupon (matches promo_codes.code). */
-const PREFERRED_WEBSITE_DIRECT_CODE = "TELAQUA25";
+const PREFERRED_WEBSITE_DIRECT_CODE = "SN40";
 
 /**
  * Suggested offer for marketing attribution (platform + language).
- * Prefers TELAQUA25 for Website + Direct; skips retired WELCOME25 / SAVE500.
+ * Prefers SN40 for Website + Direct; skips retired WELCOME25 / SAVE500.
  */
 export async function findOfferByPlatformLanguage(platform, language) {
   const retiredPlaceholders = RETIRED_OFFER_CODES.map(() => "?").join(", ");

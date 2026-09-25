@@ -16,13 +16,11 @@ import {
 } from "../lib/orderAttribution.js";
 import { ensureColumn } from "../lib/schemaHelpers.js";
 import { getRazorpayClient } from "../config/razorpay.js";
+import { normalizePromoCode } from "../services/promoService.js";
 import {
-  normalizePromoCode,
-  findPromoByCode,
-  mapPromoPricing,
-  isPromoWithinUsageLimit,
-} from "../services/promoService.js";
-import { evaluatePromoApplicability } from "../utils/promoValidity.js";
+  buildFinancialSnapshot,
+  resolveOrderPricing,
+} from "../services/orderPricing.js";
 import {
   confirmCapturedRazorpayPayment,
   logPaymentEvent,
@@ -46,9 +44,6 @@ import {
   getBearerToken,
   orderBelongsToCustomer,
 } from "../services/customerAuthService.js";
-
-/** Default PH meter unit price when no promo is applied. */
-const PRODUCT_PRICE = 2999;
 
 /** Hidden LIVE test product — amount enforced only on the server (paise). */
 const TEST_PRODUCT_NAME = "Tel-Aqua Razorpay Live Test Product";
@@ -303,88 +298,10 @@ function isValidRazorpaySignature(orderId, paymentId, signature) {
   return crypto.timingSafeEqual(generatedBuf, signatureBuf);
 }
 
-/**
- * Resolve unit/total pricing from DB promo or default product price.
- * @param {{ quantity: number, promo_code: string|null }} orderData
- */
-async function resolveOrderPricing(orderData) {
-  const quantity = orderData.quantity;
-
-  if (!orderData.promo_code) {
-    const unit_price = PRODUCT_PRICE;
-    return {
-      promo_code: null,
-      unit_price,
-      original_amount: unit_price * quantity,
-      discount_amount: 0,
-      total_amount: unit_price * quantity,
-    };
-  }
-
-  const row = await findPromoByCode(orderData.promo_code);
-  if (!row) {
-    return { error: "Invalid or inactive promo code" };
-  }
-
-  const timeCheck = evaluatePromoApplicability(row);
-  if (!timeCheck.ok) {
-    return { error: timeCheck.message };
-  }
-
-  if (!isPromoWithinUsageLimit(row)) {
-    return { error: "This coupon has reached its usage limit" };
-  }
-
-  const promo = mapPromoPricing(row);
-  if (
-    !Number.isFinite(promo.original_price) ||
-    !Number.isFinite(promo.promo_price) ||
-    promo.promo_price <= 0 ||
-    promo.original_price < promo.promo_price
-  ) {
-    return { error: "Promo pricing is invalid" };
-  }
-
-  const unit_price = promo.promo_price;
-  const original_amount = promo.original_price * quantity;
-  const total_amount = promo.promo_price * quantity;
-  const discount_amount = original_amount - total_amount;
-
-  return {
-    promo_code: promo.code,
-    unit_price,
-    original_amount,
-    discount_amount,
-    total_amount,
-  };
-}
-
 function maskId(id) {
   const s = String(id || "");
   if (s.length <= 8) return "***";
   return `${s.slice(0, 4)}…${s.slice(-4)}`;
-}
-
-function round2(value) {
-  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
-}
-
-function buildFinancialSnapshot(pricing) {
-  // Existing storefront prices are GST-inclusive. Discount is applied by choosing
-  // the server-side promo price, then GST is extracted from that discounted value.
-  const gstRate = 18;
-  const shippingAmount = 0;
-  const finalTotal = round2(pricing.total_amount + shippingAmount);
-  const taxableAmount = round2(pricing.total_amount / (1 + gstRate / 100));
-  const gstAmount = round2(pricing.total_amount - taxableAmount);
-  return {
-    subtotal: round2(pricing.original_amount),
-    taxableAmount,
-    gstAmount,
-    gstRate,
-    shippingAmount,
-    finalTotal,
-  };
 }
 
 function createInvoiceAccessToken() {
