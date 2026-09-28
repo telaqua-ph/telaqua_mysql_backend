@@ -164,11 +164,15 @@ function paidDateExpression(columns, alias = "") {
   return "NULL";
 }
 
+function createdDateExpression(columns, alias = "") {
+  return columns.has("created_at") ? `${alias ? `${alias}.` : ""}created_at` : "NULL";
+}
+
 async function fetchDashboardStats({ adminId, from, to }) {
   const columns = await readOrdersColumns();
   const includeViews = await hasAdminOrderViewsTable();
   const includeShipmentsTable = await hasShipmentsTable();
-  const params = [adminId, from, to];
+  const analysisParams = [from, from, to, to, from, from, to, to];
   const unseenJoin = includeViews
     ? `LEFT JOIN admin_order_views aov
          ON aov.order_id = o.id
@@ -185,11 +189,13 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const unseenPredicate = includeViews ? "is_seen = 0" : "FALSE";
   const revenueExpr = revenueExpression(columns);
   const paidDateExpr = paidDateExpression(columns);
+  const createdDateExpr = createdDateExpression(columns);
   // IST midnight, expressed in the same session time as CURRENT_TIMESTAMP payments.
   // Numeric offsets also work when MySQL timezone tables are not installed.
   const todayStartExpr = `TIMESTAMPADD(SECOND,
     TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()),
     DATE_SUB(DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)), INTERVAL 330 MINUTE))`;
+  const monthStartExpr = `DATE_SUB(${todayStartExpr}, INTERVAL (DAYOFMONTH(${todayStartExpr}) - 1) DAY)`;
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const codExpr = codOrderPredicate(columns);
   const quantityExpr = columns.has("quantity") ? "quantity" : "0";
@@ -226,54 +232,85 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN ${unseenPredicate} THEN 1 ELSE 0 END) AS SIGNED) AS unseen_orders
        FROM order_rows o
      ),
+     /*
+      * Device quantities and revenue deliberately have different eligibility
+      * rules. A confirmed COD order is a sale for device-count purposes from
+      * its creation date, even before collection. Revenue remains payment
+      * confirmed only. Each CTE starts from one order row, so an order can
+      * never be counted twice when its payment or status later changes.
+      */
+     device_orders AS (
+       SELECT *,
+         CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END AS device_counted_at
+       FROM orders
+       WHERE (
+         (${codExpr} AND LOWER(${orderStatusExpr}) = 'confirmed')
+         OR (
+           NOT (${codExpr})
+           AND ${paymentStatusExpr} = 'Paid'
+           AND LOWER(${orderStatusExpr}) <> 'cancelled'
+         )
+       )
+       ${paidTestFilter}
+     ),
      paid_orders AS (
-       SELECT *
+       SELECT *, ${paidDateExpr} AS paid_at
        FROM orders
        WHERE ${paymentStatusExpr} = 'Paid'
-         AND ${orderStatusExpr} <> 'Cancelled'
+         AND LOWER(${orderStatusExpr}) <> 'cancelled'
          ${paidTestFilter}
-     ),
-     sales AS (
-       SELECT
-         CAST(COALESCE(SUM(${quantityExpr}), 0) AS SIGNED) AS devices_sold,
-         CAST(COALESCE(SUM(${revenueExpr}), 0) AS DECIMAL(12,2)) AS revenue_received,
+    ),
+    sales AS (
+      SELECT
+         CAST(COALESCE((SELECT SUM(${quantityExpr}) FROM device_orders), 0) AS SIGNED) AS devices_sold,
+         CAST(COALESCE((SELECT SUM(${revenueExpr}) FROM paid_orders), 0) AS DECIMAL(12,2)) AS revenue_received,
          CAST(COALESCE(
-           SUM(CASE
-             WHEN ${paidDateExpr} IS NOT NULL
-               AND ${paidDateExpr} >= ${todayStartExpr}
-               AND ${paidDateExpr} < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
-             THEN ${quantityExpr} ELSE 0 END),
+           (SELECT SUM(CASE
+             WHEN device_counted_at IS NOT NULL
+               AND device_counted_at >= ${todayStartExpr}
+               AND device_counted_at < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
+             THEN ${quantityExpr} ELSE 0 END)
+            FROM device_orders),
            0) AS SIGNED) AS today_devices_sold,
          CAST(COALESCE(
-           SUM(CASE
-             WHEN ${paidDateExpr} IS NOT NULL
-               AND ${paidDateExpr} >= ${todayStartExpr}
-               AND ${paidDateExpr} < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
-             THEN ${revenueExpr} ELSE 0 END),
+           (SELECT SUM(CASE
+             WHEN paid_at IS NOT NULL
+               AND paid_at >= ${todayStartExpr}
+               AND paid_at < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
+             THEN ${revenueExpr} ELSE 0 END)
+            FROM paid_orders),
            0) AS DECIMAL(12,2)) AS today_revenue,
          CAST(COALESCE(
-           SUM(CASE
-             WHEN ${paidDateExpr} IS NOT NULL
-               AND ${paidDateExpr} >= DATE_FORMAT(NOW(), '%Y-%m-01')
-               AND ${paidDateExpr} < DATE_ADD(DATE_FORMAT(NOW(), '%Y-%m-01'), INTERVAL 1 MONTH)
-             THEN ${quantityExpr} ELSE 0 END),
+           (SELECT SUM(CASE
+             WHEN device_counted_at IS NOT NULL
+               AND device_counted_at >= ${monthStartExpr}
+               AND device_counted_at < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)
+             THEN ${quantityExpr} ELSE 0 END)
+            FROM device_orders),
            0) AS SIGNED) AS month_devices_sold,
          CAST(COALESCE(
-           SUM(CASE
-             WHEN ${paidDateExpr} IS NOT NULL
-               AND ${paidDateExpr} >= DATE_FORMAT(NOW(), '%Y-%m-01')
-               AND ${paidDateExpr} < DATE_ADD(DATE_FORMAT(NOW(), '%Y-%m-01'), INTERVAL 1 MONTH)
-             THEN ${revenueExpr} ELSE 0 END),
+           (SELECT SUM(CASE
+             WHEN paid_at IS NOT NULL
+               AND paid_at >= ${monthStartExpr}
+               AND paid_at < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)
+             THEN ${revenueExpr} ELSE 0 END)
+            FROM paid_orders),
            0) AS DECIMAL(12,2)) AS month_revenue
-       FROM paid_orders
      ),
      analysis AS (
        SELECT
-         CAST(COALESCE(SUM(${quantityExpr}), 0) AS SIGNED) AS analysis_devices_sold,
-         CAST(COALESCE(SUM(${revenueExpr}), 0) AS DECIMAL(12,2)) AS analysis_revenue_received
-       FROM paid_orders
-       WHERE (? IS NULL OR ${paidDateExpr} >= ?)
-         AND (? IS NULL OR ${paidDateExpr} < DATE_ADD(?, INTERVAL 1 DAY))
+         CAST(COALESCE((
+           SELECT SUM(${quantityExpr})
+           FROM device_orders
+           WHERE (? IS NULL OR device_counted_at >= ?)
+             AND (? IS NULL OR device_counted_at < DATE_ADD(?, INTERVAL 1 DAY))
+         ), 0) AS SIGNED) AS analysis_devices_sold,
+         CAST(COALESCE((
+           SELECT SUM(${revenueExpr})
+           FROM paid_orders
+           WHERE (? IS NULL OR paid_at >= ?)
+             AND (? IS NULL OR paid_at < DATE_ADD(?, INTERVAL 1 DAY))
+         ), 0) AS DECIMAL(12,2)) AS analysis_revenue_received
      )
      SELECT
        operational.*,
@@ -288,7 +325,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
      FROM operational
      CROSS JOIN sales
      CROSS JOIN analysis`,
-    [adminId, from, from, to, to]
+    includeViews ? [adminId, ...analysisParams] : analysisParams
   );
 
   return rows[0] || null;
