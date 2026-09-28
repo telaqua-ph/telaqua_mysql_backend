@@ -21,9 +21,10 @@ const CONFIRMED_ORDER_STATUSES = new Set([
 ]);
 
 const NEW_ORDER_STATUSES = new Set(["", "new", "pending"]);
+const CANCELLED_ORDER_STATUSES = new Set(["cancelled", "canceled"]);
 
 /**
- * Derive the two-state display label without changing the persisted lifecycle
+ * Derive the display label without changing the persisted lifecycle
  * status. Legacy fulfillment-like order statuses are known post-confirmation
  * states. Other unrecognised/exceptional values are not promoted to Confirmed;
  * a successful payment is the only additional confirmation proof.
@@ -33,6 +34,7 @@ export function deriveOrderConfirmationStatus(order) {
     .trim()
     .toLowerCase();
 
+  if (CANCELLED_ORDER_STATUSES.has(orderStatus)) return "Cancelled";
   if (CONFIRMED_ORDER_STATUSES.has(orderStatus)) return "Confirmed";
   if (NEW_ORDER_STATUSES.has(orderStatus)) return "New";
 
