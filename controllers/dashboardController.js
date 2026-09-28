@@ -1,6 +1,6 @@
 /**
  * Dashboard operations + sales metrics.
- * Admin-only aggregated stats sourced from backend-confirmed paid orders.
+ * Admin-only aggregated operational and sales stats.
  */
 
 import { query } from "../config/db.js";
@@ -11,7 +11,7 @@ function emptyAnalysis(from = null, to = null) {
     to,
     devicesSold: 0,
     revenueReceived: 0,
-    averageRevenuePerDevice: 0,
+    pendingRevenue: 0,
   };
 }
 
@@ -50,7 +50,7 @@ function mapStatsRow(row, from, to) {
       to,
       devicesSold: Number(row.analysis_devices_sold || 0),
       revenueReceived: Number(row.analysis_revenue_received || 0),
-      averageRevenuePerDevice: Number(row.analysis_average_revenue_per_device || 0),
+      pendingRevenue: Number(row.analysis_pending_revenue || 0),
     },
   };
 }
@@ -154,6 +154,18 @@ function codOrderPredicate(columns, alias = "") {
   return "FALSE";
 }
 
+/** Mirrors services/orderDisplayStatus.js for SQL-side dashboard aggregates. */
+function confirmedOrderPredicate(columns, alias = "") {
+  if (!columns.has("order_status")) return "FALSE";
+  const prefix = alias ? `${alias}.` : "";
+  return `LOWER(TRIM(COALESCE(${prefix}order_status, ''))) IN (
+    'confirmed', 'processing', 'ready to ship', 'ready_to_ship',
+    'ready to pickup', 'ready_to_pickup', 'shipped', 'in transit',
+    'in_transit', 'out for delivery', 'out_for_delivery', 'delivered',
+    'completed', 'fulfilled'
+  )`;
+}
+
 function paidDateExpression(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
   if (columns.has("payment_date") && columns.has("created_at")) {
@@ -168,11 +180,26 @@ function createdDateExpression(columns, alias = "") {
   return columns.has("created_at") ? `${alias ? `${alias}.` : ""}created_at` : "NULL";
 }
 
+/**
+ * Converts an ISO calendar-date parameter (interpreted as Asia/Kolkata) to
+ * the MySQL session timestamp used by order/payment columns. This avoids a
+ * UTC session moving an IST date boundary by five and a half hours.
+ */
+function istDateParameterStartExpression(parameter = "?") {
+  return `TIMESTAMPADD(SECOND,
+    TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()),
+    DATE_SUB(CAST(${parameter} AS DATE), INTERVAL 330 MINUTE))`;
+}
+
 async function fetchDashboardStats({ adminId, from, to }) {
   const columns = await readOrdersColumns();
   const includeViews = await hasAdminOrderViewsTable();
   const includeShipmentsTable = await hasShipmentsTable();
-  const analysisParams = [from, from, to, to, from, from, to, to];
+  const analysisParams = [
+    from, from, to, to,
+    from, from, to, to,
+    from, from, to, to,
+  ];
   const unseenJoin = includeViews
     ? `LEFT JOIN admin_order_views aov
          ON aov.order_id = o.id
@@ -195,9 +222,21 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const todayStartExpr = `TIMESTAMPADD(SECOND,
     TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()),
     DATE_SUB(DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)), INTERVAL 330 MINUTE))`;
-  const monthStartExpr = `DATE_SUB(${todayStartExpr}, INTERVAL (DAYOFMONTH(${todayStartExpr}) - 1) DAY)`;
+  // Calculate the month from the IST calendar date before translating it back
+  // to the session timezone. Deriving DAYOFMONTH from todayStartExpr is wrong
+  // in a UTC session because that instant is still the prior UTC date.
+  const monthStartExpr = `TIMESTAMPADD(SECOND,
+    TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()),
+    DATE_SUB(
+      DATE_SUB(
+        DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)),
+        INTERVAL (DAYOFMONTH(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)) - 1) DAY
+      ),
+      INTERVAL 330 MINUTE
+    ))`;
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const codExpr = codOrderPredicate(columns);
+  const confirmedOrderExpr = confirmedOrderPredicate(columns);
   const quantityExpr = columns.has("quantity") ? "quantity" : "0";
   const orderStatusExpr = columns.has("order_status")
     ? "COALESCE(order_status, '')"
@@ -244,7 +283,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END AS device_counted_at
        FROM orders
        WHERE (
-         (${codExpr} AND LOWER(${orderStatusExpr}) = 'confirmed')
+         (${codExpr} AND ${confirmedOrderExpr})
          OR (
            NOT (${codExpr})
            AND ${paymentStatusExpr} = 'Paid'
@@ -259,7 +298,15 @@ async function fetchDashboardStats({ adminId, from, to }) {
        WHERE ${paymentStatusExpr} = 'Paid'
          AND LOWER(${orderStatusExpr}) <> 'cancelled'
          ${paidTestFilter}
-    ),
+     ),
+     pending_cod_orders AS (
+       SELECT *, ${createdDateExpr} AS pending_at
+       FROM orders
+       WHERE ${codExpr}
+         AND ${confirmedOrderExpr}
+         AND ${paymentStatusExpr} = 'Pending'
+         ${paidTestFilter}
+     ),
     sales AS (
       SELECT
          CAST(COALESCE((SELECT SUM(${quantityExpr}) FROM device_orders), 0) AS SIGNED) AS devices_sold,
@@ -299,29 +346,33 @@ async function fetchDashboardStats({ adminId, from, to }) {
      ),
      analysis AS (
        SELECT
+         /* These three summaries share their contributing CTEs with the
+          * preset tiles; only the same explicit IST date range changes. */
          CAST(COALESCE((
            SELECT SUM(${quantityExpr})
            FROM device_orders
-           WHERE (? IS NULL OR device_counted_at >= ?)
-             AND (? IS NULL OR device_counted_at < DATE_ADD(?, INTERVAL 1 DAY))
+           WHERE (? IS NULL OR device_counted_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR device_counted_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0) AS SIGNED) AS analysis_devices_sold,
          CAST(COALESCE((
            SELECT SUM(${revenueExpr})
            FROM paid_orders
-           WHERE (? IS NULL OR paid_at >= ?)
-             AND (? IS NULL OR paid_at < DATE_ADD(?, INTERVAL 1 DAY))
-         ), 0) AS DECIMAL(12,2)) AS analysis_revenue_received
+           WHERE (? IS NULL OR paid_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR paid_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
+         ), 0) AS DECIMAL(12,2)) AS analysis_revenue_received,
+         CAST(COALESCE((
+           SELECT SUM(${revenueExpr})
+           FROM pending_cod_orders
+           WHERE (? IS NULL OR pending_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR pending_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
+         ), 0) AS DECIMAL(12,2)) AS analysis_pending_revenue
      )
      SELECT
        operational.*,
        sales.*,
        analysis.analysis_devices_sold,
        analysis.analysis_revenue_received,
-       CAST(CASE
-         WHEN analysis.analysis_devices_sold > 0
-           THEN ROUND(analysis.analysis_revenue_received / analysis.analysis_devices_sold, 2)
-         ELSE 0
-       END AS DECIMAL(12,2)) AS analysis_average_revenue_per_device
+       analysis.analysis_pending_revenue
      FROM operational
      CROSS JOIN sales
      CROSS JOIN analysis`,
