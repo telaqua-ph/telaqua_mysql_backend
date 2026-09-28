@@ -404,6 +404,86 @@ function currentAdminId(req) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+function isPendingCodPaymentEligible(order) {
+  const paymentStatus = String(order?.payment_status || "").trim().toLowerCase();
+  const orderStatus = String(order?.order_status || order?.status || "").trim().toLowerCase();
+  return isCodOrder(order) && paymentStatus === "pending" && orderStatus !== "cancelled";
+}
+
+let codPaymentAuditTableReady;
+
+async function ensureCodPaymentAuditTable() {
+  if (!codPaymentAuditTableReady) {
+    codPaymentAuditTableReady = query(`
+      CREATE TABLE IF NOT EXISTS cod_payment_audit_log (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        order_id BIGINT UNSIGNED NOT NULL,
+        admin_id INT NOT NULL,
+        action VARCHAR(80) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_cod_payment_audit_order (order_id, created_at),
+        KEY idx_cod_payment_audit_admin (admin_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `).catch((error) => {
+      codPaymentAuditTableReady = null;
+      throw error;
+    });
+  }
+  return codPaymentAuditTableReady;
+}
+
+async function markPendingCodPaymentPaid({ id, adminId }) {
+  const { rows: existing } = await query(
+    `SELECT * FROM orders WHERE id = ? LIMIT 1`,
+    [id]
+  );
+  if (existing.length === 0) return { kind: "failed", reason: "Order not found" };
+
+  const order = existing[0];
+  if (String(order.order_status || order.status || "").trim().toLowerCase() === "cancelled") {
+    return { kind: "failed", reason: "Cancelled orders cannot be marked as paid" };
+  }
+  if (!isCodOrder(order)) {
+    return { kind: "failed", reason: "COD payment collection is not allowed for Razorpay orders" };
+  }
+  if (String(order.payment_status || "").trim().toLowerCase() === "paid") {
+    return { kind: "skipped", reason: "COD payment is already Paid" };
+  }
+  if (!isPendingCodPaymentEligible(order)) {
+    return { kind: "failed", reason: "COD payment can only move from Pending to Paid" };
+  }
+
+  // Ensure the audit destination exists before making the payment transition.
+  await ensureCodPaymentAuditTable();
+
+  // The conditional update makes concurrent/repeated requests safe: only the
+  // first request can change a pending COD payment and create an audit entry.
+  const updated = await query(
+    `UPDATE orders
+     SET payment_status = 'Paid',
+         payment_date = COALESCE(payment_date, CURRENT_TIMESTAMP),
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ?
+       AND payment_mode = 'cod'
+       AND payment_status = 'Pending'
+       AND LOWER(COALESCE(order_status, '')) <> 'cancelled'`,
+    [id]
+  );
+  if (!updated.rowCount) {
+    return { kind: "skipped", reason: "Order is no longer eligible for COD payment collection" };
+  }
+
+  await query(
+    `INSERT INTO cod_payment_audit_log (order_id, admin_id, action)
+     VALUES (?, ?, 'cod_payment_marked_paid')`,
+    [id, adminId]
+  );
+
+  const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
+  return { kind: "success", order: rows[0] };
+}
+
 /** GET /api/orders — latest 2000 rows (stable sort). Dashboard cards use /api/dashboard/stats. */
 export async function listOrders(req, res) {
   const adminId = currentAdminId(req);
@@ -1194,62 +1274,17 @@ export async function collectCodPayment(req, res) {
       });
     }
 
-    const { rows: existing } = await query(
-      `SELECT * FROM orders WHERE id = ? LIMIT 1`,
-      [id]
-    );
-    if (existing.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found",
-      });
-    }
-
-    const order = existing[0];
-    if (!isCodOrder(order)) {
+    const result = await markPendingCodPaymentPaid({ id, adminId });
+    if (result.kind !== "success") {
       return res.status(409).json({
         success: false,
-        message: "COD payment collection is not allowed for Razorpay orders",
+        message: result.reason,
       });
     }
-
-    const currentPay = String(order.payment_status || "").trim();
-    if (currentPay === "Paid") {
-      return res.status(409).json({
-        success: false,
-        message: "COD payment is already Paid",
-      });
-    }
-    if (currentPay !== "Pending") {
-      return res.status(409).json({
-        success: false,
-        message: "COD payment can only move from Pending to Paid",
-      });
-    }
-
-    const updated = await query(
-      `UPDATE orders
-       SET payment_status = 'Paid',
-           payment_date = COALESCE(payment_date, CURRENT_TIMESTAMP),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?
-         AND payment_mode = 'cod'
-         AND payment_status = 'Pending'`,
-      [id]
-    );
-
-    if (!updated.rowCount) {
-      return res.status(409).json({
-        success: false,
-        message: "COD payment could not be updated",
-      });
-    }
-
-    const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
     return res.status(200).json({
       success: true,
       message: "COD payment marked as Paid",
-      order: withDisplayStatuses(rows[0]),
+      order: withDisplayStatuses(result.order),
     });
   } catch (error) {
     if (isMissingColumnError(error, "payment_mode")) {
@@ -1263,6 +1298,50 @@ export async function collectCodPayment(req, res) {
       success: false,
       message: "Internal server error",
     });
+  }
+}
+
+/** PATCH /api/orders/cod-payment/bulk — mark explicit pending COD order IDs as paid. */
+export async function collectBulkCodPayments(req, res) {
+  const adminId = currentAdminId(req);
+  if (!adminId) return res.status(401).json({ success: false, message: "Unauthorized" });
+
+  const rawIds = Array.isArray(req.body?.order_ids) ? req.body.order_ids : [];
+  const ids = [...new Set(rawIds.map(parseOrderId).filter((id) => id !== null))];
+  if (!ids.length) {
+    return res.status(400).json({ success: false, message: "Select at least one valid order" });
+  }
+  if (ids.length > 100) {
+    return res.status(400).json({ success: false, message: "A maximum of 100 orders can be updated at once" });
+  }
+
+  const succeeded = [];
+  const failed = [];
+  const skipped = [];
+  try {
+    for (const id of ids) {
+      const result = await markPendingCodPaymentPaid({ id, adminId });
+      if (result.kind === "success") {
+        succeeded.push({ id, order: withDisplayStatuses(result.order) });
+      } else if (result.kind === "skipped") {
+        skipped.push({ id, reason: result.reason });
+      } else {
+        failed.push({ id, reason: result.reason });
+      }
+    }
+    return res.status(200).json({
+      success: true,
+      succeeded,
+      failed,
+      skipped,
+      message: `${succeeded.length} COD payment${succeeded.length === 1 ? "" : "s"} marked as Paid`,
+    });
+  } catch (error) {
+    if (isMissingColumnError(error, "payment_mode")) {
+      return res.status(503).json({ success: false, message: "Orders table is missing payment_mode. Run node scripts/migrate-payment-mode.js" });
+    }
+    console.error("Bulk COD payment API error:", error);
+    return res.status(500).json({ success: false, message: "COD payments could not be updated" });
   }
 }
 

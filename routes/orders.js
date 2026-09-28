@@ -9,6 +9,7 @@ import {
   createManualCodOrder,
   createWebsiteCodOrder,
   collectCodPayment,
+  collectBulkCodPayments,
   getOrderById,
   updateOrder,
   deleteOrder,
@@ -29,6 +30,7 @@ router.get("/", requireAuth, listOrders);
 router.post("/", createOrder);
 router.post("/website-cod", createWebsiteCodOrder);
 router.post("/manual-cod", requireAuth, createManualCodOrder);
+router.patch("/cod-payment/bulk", requireAuth, collectBulkCodPayments);
 router.post("/:id/mark-seen", requireAuth, markOrderSeen);
 router.post("/reconcile-razorpay", requireAuth, reconcileRazorpayPayment);
 router.post("/reconcile-pending-razorpay", requireAuth, reconcilePendingRazorpayPayments);
