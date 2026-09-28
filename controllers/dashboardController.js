@@ -204,6 +204,14 @@ function cancellationPredicate(columns, alias = "", includeInventoryHistory = fa
   if (columns.has("is_cancelled")) signals.push(`COALESCE(${prefix}is_cancelled, 0) = 1`);
   if (columns.has("cancelled_at")) signals.push(`${prefix}cancelled_at IS NOT NULL`);
   if (columns.has("canceled_at")) signals.push(`${prefix}canceled_at IS NOT NULL`);
+  // Mirrors isCancellationMarkedOnOrder in orderController: a Delhivery
+  // cancellation may only be recorded on the order row itself.
+  if (columns.has("fulfillment_status")) {
+    signals.push(`LOWER(TRIM(COALESCE(${prefix}fulfillment_status, ''))) IN ('cancelled', 'canceled')`);
+  }
+  if (columns.has("shipment_status")) {
+    signals.push(`LOWER(TRIM(COALESCE(${prefix}shipment_status, ''))) IN ('cancelled', 'canceled')`);
+  }
   if (includeInventoryHistory) {
     signals.push(`EXISTS (
       SELECT 1 FROM inventory_history cancellation_history
