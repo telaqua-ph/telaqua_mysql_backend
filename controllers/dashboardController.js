@@ -273,10 +273,11 @@ async function fetchDashboardStats({ adminId, from, to }) {
      ),
      /*
       * Device quantities and revenue deliberately have different eligibility
-      * rules. A confirmed COD order is a sale for device-count purposes from
-      * its creation date, even before collection. Revenue remains payment
-      * confirmed only. Each CTE starts from one order row, so an order can
-      * never be counted twice when its payment or status later changes.
+      * rules. Only confirmed orders contribute: a confirmed COD order is a
+      * sale from its creation date, even before collection, while a confirmed
+      * Razorpay order must also be Paid. Revenue remains payment-confirmed
+      * only. Each CTE starts from one order row, so an order can never be
+      * counted twice when its payment or status later changes.
       */
      device_orders AS (
        SELECT *,
@@ -287,7 +288,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
          OR (
            NOT (${codExpr})
            AND ${paymentStatusExpr} = 'Paid'
-           AND LOWER(${orderStatusExpr}) <> 'cancelled'
+           AND ${confirmedOrderExpr}
          )
        )
        ${paidTestFilter}
