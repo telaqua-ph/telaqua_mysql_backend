@@ -91,6 +91,16 @@ async function hasShipmentsTable() {
   return Number(rows[0]?.cnt || 0) > 0;
 }
 
+async function hasInventoryHistoryTable() {
+  const { rows } = await query(
+    `SELECT COUNT(*) AS cnt
+     FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'inventory_history'`
+  );
+  return Number(rows[0]?.cnt || 0) > 0;
+}
+
 function revenueExpression(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
   const hasFinalTotal = columns.has("final_total");
@@ -181,6 +191,40 @@ function createdDateExpression(columns, alias = "") {
 }
 
 /**
+ * A cancellation is not trusted to one legacy display field. Older rows can
+ * retain New/Confirmed after the cancellation transaction was recorded, so
+ * device reporting also checks the inventory cancellation audit and shipment
+ * cancellation records whenever those tables are installed.
+ */
+function cancellationPredicate(columns, alias = "", includeInventoryHistory = false, includeShipmentsTable = false) {
+  const prefix = alias ? `${alias}.` : "";
+  const signals = [
+    `LOWER(TRIM(COALESCE(${prefix}order_status, ''))) IN ('cancelled', 'canceled')`,
+  ];
+  if (columns.has("is_cancelled")) signals.push(`COALESCE(${prefix}is_cancelled, 0) = 1`);
+  if (columns.has("cancelled_at")) signals.push(`${prefix}cancelled_at IS NOT NULL`);
+  if (columns.has("canceled_at")) signals.push(`${prefix}canceled_at IS NOT NULL`);
+  if (includeInventoryHistory) {
+    signals.push(`EXISTS (
+      SELECT 1 FROM inventory_history cancellation_history
+      WHERE cancellation_history.order_id = ${prefix}id
+        AND UPPER(TRIM(COALESCE(cancellation_history.transaction_type, ''))) = 'CANCELLATION'
+    )`);
+  }
+  if (includeShipmentsTable) {
+    signals.push(`EXISTS (
+      SELECT 1 FROM shipments cancellation_shipment
+      WHERE cancellation_shipment.order_id = ${prefix}id
+        AND (
+          LOWER(TRIM(COALESCE(cancellation_shipment.fulfillment_status, ''))) IN ('cancelled', 'canceled')
+          OR LOWER(TRIM(COALESCE(cancellation_shipment.shipment_status, ''))) IN ('cancelled', 'canceled')
+        )
+    )`);
+  }
+  return `(${signals.join(" OR ")})`;
+}
+
+/**
  * Converts an ISO calendar-date parameter (interpreted as Asia/Kolkata) to
  * the MySQL session timestamp used by order/payment columns. This avoids a
  * UTC session moving an IST date boundary by five and a half hours.
@@ -195,6 +239,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const columns = await readOrdersColumns();
   const includeViews = await hasAdminOrderViewsTable();
   const includeShipmentsTable = await hasShipmentsTable();
+  const includeInventoryHistory = await hasInventoryHistoryTable();
   const analysisParams = [
     from, from, to, to,
     from, from, to, to,
@@ -237,6 +282,12 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const codExpr = codOrderPredicate(columns);
   const confirmedOrderExpr = confirmedOrderPredicate(columns);
+  const cancelledExpr = cancellationPredicate(
+    columns,
+    "o",
+    includeInventoryHistory,
+    includeShipmentsTable
+  );
   const quantityExpr = columns.has("quantity") ? "quantity" : "0";
   const orderStatusExpr = columns.has("order_status")
     ? "COALESCE(order_status, '')"
@@ -253,6 +304,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
        SELECT
          o.*,
          ${shipmentsSelect}
+         ${cancelledExpr} AS cancellation_evidence,
          ${includeViews ? "aov.first_viewed_at IS NOT NULL" : "0"} AS is_seen
        FROM orders o
        ${unseenJoin}
@@ -267,7 +319,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Pending' THEN 1 ELSE 0 END) AS SIGNED) AS pending_payments,
          CAST(SUM(CASE WHEN ${codExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_orders,
          CAST(SUM(CASE WHEN ${shipmentExpr} THEN 1 ELSE 0 END) AS SIGNED) AS shipments_created,
-         CAST(SUM(CASE WHEN LOWER(${orderStatusExpr}) = 'cancelled' THEN 1 ELSE 0 END) AS SIGNED) AS cancelled_orders,
+         CAST(SUM(CASE WHEN cancellation_evidence THEN 1 ELSE 0 END) AS SIGNED) AS cancelled_orders,
          CAST(SUM(CASE WHEN ${unseenPredicate} THEN 1 ELSE 0 END) AS SIGNED) AS unseen_orders
        FROM order_rows o
      ),
@@ -282,8 +334,9 @@ async function fetchDashboardStats({ adminId, from, to }) {
      device_orders AS (
        SELECT *,
          CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END AS device_counted_at
-       FROM orders
-       WHERE (
+       FROM order_rows
+       WHERE NOT cancellation_evidence
+         AND (
          (${codExpr} AND ${confirmedOrderExpr})
          OR (
            NOT (${codExpr})

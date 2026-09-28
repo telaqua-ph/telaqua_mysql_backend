@@ -110,6 +110,57 @@ async function attachLatestShipments(orders) {
   }
 }
 
+function isCancellationMarkedOnOrder(order) {
+  const status = String(order?.order_status || order?.status || "").trim().toLowerCase();
+  if (["cancelled", "canceled"].includes(status)) return true;
+  if (Number(order?.is_cancelled) === 1) return true;
+  if (order?.cancelled_at || order?.canceled_at) return true;
+  const fulfillment = String(order?.fulfillment_status || "").trim().toLowerCase();
+  const shipment = String(order?.shipment_status || "").trim().toLowerCase();
+  return ["cancelled", "canceled"].includes(fulfillment) || ["cancelled", "canceled"].includes(shipment);
+}
+
+/** Annotate list/detail rows with cancellation evidence from the audit tables. */
+async function attachCancellationFlags(orders) {
+  if (!orders.length) return orders;
+  const ids = orders.map((order) => Number(order.id)).filter(Number.isInteger);
+  if (!ids.length) return orders;
+  const placeholders = ids.map(() => "?").join(",");
+  const cancelledIds = new Set();
+
+  try {
+    const { rows } = await query(
+      `SELECT DISTINCT order_id FROM inventory_history
+       WHERE order_id IN (${placeholders})
+         AND UPPER(TRIM(COALESCE(transaction_type, ''))) = 'CANCELLATION'`,
+      ids
+    );
+    rows.forEach((row) => cancelledIds.add(Number(row.order_id)));
+  } catch (error) {
+    if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+  }
+
+  try {
+    const { rows } = await query(
+      `SELECT DISTINCT order_id FROM shipments
+       WHERE order_id IN (${placeholders})
+         AND (
+           LOWER(TRIM(COALESCE(fulfillment_status, ''))) IN ('cancelled', 'canceled')
+           OR LOWER(TRIM(COALESCE(shipment_status, ''))) IN ('cancelled', 'canceled')
+         )`,
+      ids
+    );
+    rows.forEach((row) => cancelledIds.add(Number(row.order_id)));
+  } catch (error) {
+    if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+  }
+
+  return orders.map((order) => ({
+    ...order,
+    is_cancelled: isCancellationMarkedOnOrder(order) || cancelledIds.has(Number(order.id)) ? 1 : 0,
+  }));
+}
+
 function trimStr(value) {
   return typeof value === "string" ? value.trim() : value;
 }
@@ -534,6 +585,7 @@ export async function listOrders(req, res) {
     }
 
     rows = await attachLatestShipments(rows);
+    rows = await attachCancellationFlags(rows);
     rows = rows.map(withDisplayStatuses);
     return res.status(200).json({
       success: true,
@@ -1371,11 +1423,12 @@ export async function getOrderById(req, res) {
     }
 
     const [withShipment] = await attachLatestShipments(rows);
+    const [withCancellationFlag] = await attachCancellationFlags([withShipment]);
     const {
       invoice_access_token_hash: _invoiceAccessTokenHash,
       invoice_attempt_token: _invoiceAttemptToken,
       ...safeOrder
-    } = withShipment;
+    } = withCancellationFlag;
     Object.assign(safeOrder, withDisplayStatuses(safeOrder));
 
     return res.status(200).json({

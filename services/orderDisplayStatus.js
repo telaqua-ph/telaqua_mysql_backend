@@ -30,6 +30,9 @@ const CANCELLED_ORDER_STATUSES = new Set(["cancelled", "canceled"]);
  * a successful payment is the only additional confirmation proof.
  */
 export function deriveOrderConfirmationStatus(order) {
+  if (Number(order?.is_cancelled) === 1 || order?.cancelled_at || order?.canceled_at) {
+    return "Cancelled";
+  }
   const orderStatus = String(order?.order_status || order?.status || "")
     .trim()
     .toLowerCase();

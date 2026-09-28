@@ -25,8 +25,9 @@ test("shipment progress never changes the confirmation label", () => {
   assert.equal(deriveOrderConfirmationStatus({ order_status: "New", tracking_status: "Delivered" }), "New");
 });
 
-test("unknown exceptional statuses are not blindly mapped to confirmed", () => {
-  assert.equal(deriveOrderConfirmationStatus({ order_status: "Cancelled", payment_status: "Failed" }), "New");
+test("cancelled and unknown exceptional statuses are not promoted to confirmed", () => {
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Cancelled", payment_status: "Failed" }), "Cancelled");
+  assert.equal(deriveOrderConfirmationStatus({ order_status: "Confirmed", is_cancelled: 1 }), "Cancelled");
   assert.equal(deriveOrderConfirmationStatus({ order_status: "Returned", payment_status: "Pending" }), "New");
 });
 
