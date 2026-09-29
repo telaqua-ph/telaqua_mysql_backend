@@ -74,7 +74,7 @@ function logicalFailureMessage(payload) {
   return null;
 }
 
-function assertDelhiveryAccepted(payload, operation) {
+export function assertDelhiveryAccepted(payload, operation) {
   const message = logicalFailureMessage(payload);
   if (!message) return;
   const error = new Error(message);
@@ -237,7 +237,7 @@ function assertShipmentEnvironment(shipment) {
   }
 }
 
-async function acquireShipmentOperation(shipmentId, operation) {
+export async function acquireShipmentOperation(shipmentId, operation) {
   const token = `${operation}:${crypto.randomUUID()}`;
   const client = await pool.connect();
   try {
@@ -266,7 +266,7 @@ async function acquireShipmentOperation(shipmentId, operation) {
   }
 }
 
-async function releaseShipmentOperation(shipmentId, token) {
+export async function releaseShipmentOperation(shipmentId, token) {
   if (!shipmentId || !token) return;
   await query(
     "UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?",

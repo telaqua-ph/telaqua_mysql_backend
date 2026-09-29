@@ -113,6 +113,20 @@ requires `order_id`; it no longer allocates anonymous/unassigned AWBs.
 - NDR actions are limited to Delhivery-supported `RE-ATTEMPT`, `DEFER_DLV`, and
   `EDIT_DETAILS`, and only appear while the stored fulfillment state is NDR.
 
+## Correcting an order's delivery details
+
+`PATCH /api/orders/:id/delivery-details` (active admin only) changes the order's
+`customer_name`, `phone`, `address`, `city`, `state`, `pincode` — nothing else.
+Every save is written to `order_delivery_audit_log` (admin, before/after,
+courier outcome); `GET /api/orders/:id/delivery-details/history` reads it.
+
+| Shipment stage | Behaviour |
+| --- | --- |
+| No manifested shipment (no AWB, or AWB only reserved) | Saved; shipment create reads the corrected order row. |
+| Manifested, awaiting pickup (`shipment_created`, `pickup_requested`, `pickup_failed`) | Live tracking re-checked, then `name`/`add`/`phone` sent to Delhivery's edit API (`SHIPMENT_UPDATE_URL`, `/api/p/edit`). PIN/city/state changes are rejected (the edit API cannot change them). If Delhivery rejects or errors, the order is still saved but the audit row, API response and admin UI say Delhivery was **not** updated; saving again retries. |
+| Picked up / in transit / out for delivery / NDR / RTO | Rejected with guidance to contact Delhivery (NDR: use `EDIT_DETAILS`). |
+| Delivered / cancelled / returned | Rejected. |
+
 ## Data model
 
 - `orders.fulfillment_status`: separate from `payment_status`.

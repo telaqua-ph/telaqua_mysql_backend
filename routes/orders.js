@@ -22,7 +22,12 @@ import {
   processOrderInvoice,
   refreshOrderInvoiceHsn,
 } from "../controllers/invoiceController.js";
+import {
+  getOrderDeliveryDetailsHistory,
+  updateOrderDeliveryDetails,
+} from "../controllers/orderDeliveryDetailsController.js";
 import { requireAuth } from "../middleware/auth.js";
+import { requireActiveAdmin } from "../middleware/requireActiveAdmin.js";
 
 const router = Router();
 
@@ -38,6 +43,8 @@ router.post("/:orderId/invoice", requireAuth, processOrderInvoice);
 router.post("/:orderId/retry-invoice", requireAuth, processOrderInvoice);
 router.post("/:orderId/invoice/refresh-hsn", requireAuth, refreshOrderInvoiceHsn);
 router.get("/:orderId/invoice/download", requireAuth, downloadOrderInvoice);
+router.get("/:id/delivery-details/history", requireAuth, requireActiveAdmin, getOrderDeliveryDetailsHistory);
+router.patch("/:id/delivery-details", requireAuth, requireActiveAdmin, updateOrderDeliveryDetails);
 router.get("/:id", getOrderById);
 router.patch("/:id/cod-payment", requireAuth, collectCodPayment);
 router.put("/:id", requireAuth, updateOrder);
