@@ -286,6 +286,18 @@ function validateManualCodOrder(body) {
   const unit_price = Number(body.unit_price);
   const total_amount = Number(body.total_amount);
 
+  const promoRaw =
+    body.promo_code !== undefined &&
+    body.promo_code !== null &&
+    body.promo_code !== ""
+      ? body.promo_code
+      : body.coupon_code !== undefined &&
+          body.coupon_code !== null &&
+          body.coupon_code !== ""
+        ? body.coupon_code
+        : null;
+  const promo_code = promoRaw ? normalizePromoCode(promoRaw) || null : null;
+
   if (!customer_name) {
     return { error: "customer_name is required" };
   }
@@ -349,6 +361,7 @@ function validateManualCodOrder(body) {
       quantity,
       unit_price,
       total_amount,
+      promo_code,
     },
   };
 }
@@ -918,42 +931,114 @@ export async function createManualCodOrder(req, res) {
 
     const orderData = validation.data;
 
+    let pricing = null;
+    if (orderData.promo_code) {
+      // Coupon applied: price comes from the promo record, same as website COD.
+      pricing = await resolveOrderPricing(orderData);
+      if (pricing.error) {
+        return res.status(400).json({
+          success: false,
+          message: pricing.error,
+        });
+      }
+    }
+
     let inserted;
     try {
-      inserted = await query(
-        `INSERT INTO orders (
-          customer_name,
-          phone,
-          email,
-          address,
-          city,
-          state,
-          pincode,
-          quantity,
-          unit_price,
-          total_amount,
-          payment_method,
-          payment_status,
-          order_status,
-          payment_mode,
-          whatsapp_updates_consent,
-          whatsapp_consent_at
-        ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod', 0, NULL
-        )`,
-        [
-          orderData.customer_name,
-          orderData.phone,
-          orderData.email,
-          orderData.address,
-          orderData.city,
-          orderData.state,
-          orderData.pincode,
-          orderData.quantity,
-          orderData.unit_price,
-          orderData.total_amount,
-        ]
-      );
+      if (pricing) {
+        const financial = buildFinancialSnapshot(pricing);
+        inserted = await query(
+          `INSERT INTO orders (
+            customer_name,
+            phone,
+            email,
+            address,
+            city,
+            state,
+            pincode,
+            quantity,
+            unit_price,
+            total_amount,
+            payment_method,
+            payment_status,
+            order_status,
+            payment_mode,
+            promo_code,
+            original_amount,
+            discount_amount,
+            subtotal,
+            taxable_amount,
+            gst_amount,
+            gst_rate,
+            shipping_amount,
+            final_total,
+            invoice_status,
+            whatsapp_updates_consent,
+            whatsapp_consent_at
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'cod', 'Pending', 'Confirmed', 'cod',
+            ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'not_created', 0, NULL
+          )`,
+          [
+            orderData.customer_name,
+            orderData.phone,
+            orderData.email,
+            orderData.address,
+            orderData.city,
+            orderData.state,
+            orderData.pincode,
+            orderData.quantity,
+            pricing.unit_price,
+            financial.finalTotal,
+            pricing.promo_code,
+            pricing.original_amount,
+            pricing.discount_amount,
+            financial.subtotal,
+            financial.taxableAmount,
+            financial.gstAmount,
+            financial.gstRate,
+            financial.shippingAmount,
+            financial.finalTotal,
+          ]
+        );
+      } else {
+        inserted = await query(
+          `INSERT INTO orders (
+            customer_name,
+            phone,
+            email,
+            address,
+            city,
+            state,
+            pincode,
+            quantity,
+            unit_price,
+            total_amount,
+            payment_method,
+            payment_status,
+            order_status,
+            payment_mode,
+            whatsapp_updates_consent,
+            whatsapp_consent_at
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod', 0, NULL
+          )`,
+          [
+            orderData.customer_name,
+            orderData.phone,
+            orderData.email,
+            orderData.address,
+            orderData.city,
+            orderData.state,
+            orderData.pincode,
+            orderData.quantity,
+            orderData.unit_price,
+            orderData.total_amount,
+          ]
+        );
+      }
     } catch (error) {
       if (isMissingColumnError(error, "payment_mode")) {
         return res.status(503).json({
