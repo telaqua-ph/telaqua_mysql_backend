@@ -40,10 +40,13 @@ function mapStatsRow(row, from, to) {
     shipmentsCreated: Number(row.shipments_created || 0),
     unseenOrders: Number(row.unseen_orders || 0),
     devicesSold: Number(row.devices_sold || 0),
+    codPendingDevices: Number(row.cod_pending_devices || 0),
     revenueReceived: Number(row.revenue_received || 0),
     todayDevicesSold: Number(row.today_devices_sold || 0),
+    todayCodPendingDevices: Number(row.today_cod_pending_devices || 0),
     todayRevenue: Number(row.today_revenue || 0),
     monthDevicesSold: Number(row.month_devices_sold || 0),
+    monthCodPendingDevices: Number(row.month_cod_pending_devices || 0),
     monthRevenue: Number(row.month_revenue || 0),
     analysis: {
       from,
@@ -392,12 +395,14 @@ async function fetchDashboardStats({ adminId, from, to }) {
        SELECT
          id,
          MAX(device_quantity) AS quantity,
-         MAX(device_counted_at) AS device_counted_at
+         MAX(device_counted_at) AS device_counted_at,
+         MAX(device_paid) AS is_paid
        FROM (
          SELECT
            id,
            ${quantityExpr} AS device_quantity,
-           CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END AS device_counted_at
+           CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END AS device_counted_at,
+           CASE WHEN LOWER(TRIM(${paymentStatusExpr})) = 'paid' THEN 1 ELSE 0 END AS device_paid
          FROM order_rows
          WHERE NOT cancellation_evidence
            AND ${deviceConfirmedExpr}
@@ -430,7 +435,11 @@ async function fetchDashboardStats({ adminId, from, to }) {
      ),
     sales AS (
       SELECT
-         CAST(COALESCE((SELECT SUM(quantity) FROM device_orders), 0) AS SIGNED) AS devices_sold,
+         /* Devices Sold = paid orders only (Razorpay paid + COD marked paid).
+          * COD Payment Pending = confirmed COD not yet marked paid. Together
+          * they equal every confirmed, non-RTO device. */
+         CAST(COALESCE((SELECT SUM(quantity) FROM device_orders WHERE is_paid = 1), 0) AS SIGNED) AS devices_sold,
+         CAST(COALESCE((SELECT SUM(quantity) FROM device_orders WHERE is_paid = 0), 0) AS SIGNED) AS cod_pending_devices,
          CAST(COALESCE((SELECT SUM(${revenueExpr}) FROM paid_orders), 0) AS DECIMAL(12,2)) AS revenue_received,
          CAST(COALESCE(
            (SELECT SUM(CASE
@@ -438,8 +447,16 @@ async function fetchDashboardStats({ adminId, from, to }) {
                AND device_counted_at >= ${todayStartExpr}
                AND device_counted_at < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
              THEN quantity ELSE 0 END)
-            FROM device_orders),
+            FROM device_orders WHERE is_paid = 1),
            0) AS SIGNED) AS today_devices_sold,
+         CAST(COALESCE(
+           (SELECT SUM(CASE
+             WHEN device_counted_at IS NOT NULL
+               AND device_counted_at >= ${todayStartExpr}
+               AND device_counted_at < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
+             THEN quantity ELSE 0 END)
+            FROM device_orders WHERE is_paid = 0),
+           0) AS SIGNED) AS today_cod_pending_devices,
          CAST(COALESCE(
            (SELECT SUM(CASE
              WHEN paid_at IS NOT NULL
@@ -454,8 +471,16 @@ async function fetchDashboardStats({ adminId, from, to }) {
                AND device_counted_at >= ${monthStartExpr}
                AND device_counted_at < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)
              THEN quantity ELSE 0 END)
-            FROM device_orders),
+            FROM device_orders WHERE is_paid = 1),
            0) AS SIGNED) AS month_devices_sold,
+         CAST(COALESCE(
+           (SELECT SUM(CASE
+             WHEN device_counted_at IS NOT NULL
+               AND device_counted_at >= ${monthStartExpr}
+               AND device_counted_at < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)
+             THEN quantity ELSE 0 END)
+            FROM device_orders WHERE is_paid = 0),
+           0) AS SIGNED) AS month_cod_pending_devices,
          CAST(COALESCE(
            (SELECT SUM(CASE
              WHEN paid_at IS NOT NULL
@@ -472,7 +497,8 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(COALESCE((
            SELECT SUM(quantity)
            FROM device_orders
-           WHERE (? IS NULL OR device_counted_at >= ${istDateParameterStartExpression("?")})
+           WHERE is_paid = 1
+             AND (? IS NULL OR device_counted_at >= ${istDateParameterStartExpression("?")})
              AND (? IS NULL OR device_counted_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0) AS SIGNED) AS analysis_devices_sold,
          CAST(COALESCE((
@@ -541,10 +567,13 @@ export async function getStats(req, res) {
         cancelledOrders: 0,
         unseenOrders: 0,
         devicesSold: 0,
+        codPendingDevices: 0,
         revenueReceived: 0,
         todayDevicesSold: 0,
+        todayCodPendingDevices: 0,
         todayRevenue: 0,
         monthDevicesSold: 0,
+        monthCodPendingDevices: 0,
         monthRevenue: 0,
         analysis: emptyAnalysis(from, to),
       });
