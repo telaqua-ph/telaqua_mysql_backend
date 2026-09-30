@@ -11,7 +11,7 @@ let timer = null;
 let running = false;
 
 const DEFAULT_PACE_MS = 750;
-const MAX_SYNC_BATCH = 25;
+const MAX_SYNC_BATCH = Math.min(100, Math.max(1, Number(process.env.DELHIVERY_TRACKING_SYNC_BATCH) || 60));
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,7 +36,7 @@ async function runTrackingSync() {
            'cancelled' COLLATE utf8mb4_unicode_ci,
            'returned' COLLATE utf8mb4_unicode_ci
          )
-         AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 30 MINUTE))
+         AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 10 MINUTE))
        ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT ${MAX_SYNC_BATCH}`,
       [getDelhiveryEnvironment()]
     );
@@ -48,8 +48,14 @@ async function runTrackingSync() {
         await refreshOneShipment(shipment, null);
       } catch (error) {
         if (isDelhiveryWaybillMissingError(error)) {
+          /* Unknown AWB upstream. Old shipments back off for a day so they
+             cannot keep occupying the batch ahead of live shipments; brand-new
+             AWBs (Delhivery may not index them yet) are retried next run. */
           await query(
-            "UPDATE shipments SET last_error=?, last_tracking_update=NOW() WHERE id=?",
+            `UPDATE shipments SET last_error=?,
+               last_tracking_update=CASE WHEN created_at < DATE_SUB(NOW(), INTERVAL 2 DAY)
+                 THEN DATE_ADD(NOW(), INTERVAL 1 DAY) ELSE NOW() END
+             WHERE id=?`,
             [
               String(error?.message || "Delhivery has no data for this waybill").slice(0, 2000),
               shipment.id,
@@ -70,7 +76,9 @@ async function runTrackingSync() {
           ]).catch(() => {});
           await sleep(waitMs);
         } else {
-          await query("UPDATE shipments SET last_error=? WHERE id=?", [
+          /* Move failed shipments to the back of the queue; otherwise the same
+             failing rows are re-selected every run and starve live shipments. */
+          await query("UPDATE shipments SET last_error=?, last_tracking_update=NOW() WHERE id=?", [
             String(error?.message || "Scheduled tracking failed").slice(0, 2000),
             shipment.id,
           ]).catch(() => {});

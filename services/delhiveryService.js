@@ -172,7 +172,7 @@ function throwUpstreamError(response, debugMeta, body) {
   err.code =
     response.status === 429
       ? "DELHIVERY_THROTTLED"
-      : /data does not exists? for provided waybill/i.test(String(upstreamMessage || ""))
+      : /data does not exists? for provided waybill|no such waybill/i.test(String(upstreamMessage || ""))
         ? "DELHIVERY_WAYBILL_NOT_FOUND"
         : "DELHIVERY_UPSTREAM_ERROR";
   err.status = response.status;
@@ -199,7 +199,7 @@ export function isDelhiveryWaybillMissingError(error) {
   const message = String(error?.message || "");
   return (
     code === "DELHIVERY_WAYBILL_NOT_FOUND" ||
-    /data does not exists? for provided waybill/i.test(message)
+    /data does not exists? for provided waybill|no such waybill/i.test(message)
   );
 }
 
