@@ -340,6 +340,16 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const paymentStatusExpr = columns.has("payment_status")
     ? "COALESCE(payment_status, '')"
     : "''";
+  /* Shipments returning to origin (RTO in transit) or already returned are not sales. */
+  const rtoStatuses = "'rto', 'returned'";
+  const rtoFilters = [];
+  if (columns.has("fulfillment_status")) {
+    rtoFilters.push(`LOWER(TRIM(COALESCE(fulfillment_status, ''))) NOT IN (${rtoStatuses})`);
+  }
+  if (includeShipmentsTable) {
+    rtoFilters.push(`LOWER(TRIM(COALESCE(shipment_fulfillment_status, ''))) NOT IN (${rtoStatuses})`);
+  }
+  const notRtoFilter = rtoFilters.map((f) => `AND ${f}`).join("\n           ");
   const paidTestFilter = columns.has("is_test_order")
     ? "AND COALESCE(is_test_order, 0) = 0"
     : "";
@@ -398,6 +408,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
                AND LOWER(TRIM(${paymentStatusExpr})) = 'paid'
              )
            )
+           ${notRtoFilter}
            ${paidTestFilter}
        ) device_order_rows
        GROUP BY id
