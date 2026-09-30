@@ -176,6 +176,42 @@ function confirmedOrderPredicate(columns, alias = "") {
   )`;
 }
 
+/**
+ * Mirrors deriveOrderConfirmationStatus === "Confirmed".
+ * Blank, New, and Pending stay New even when payment_status is Paid.
+ * Waybill and shipment columns are not read, so a shipment cannot confirm an order.
+ */
+function deviceConfirmationPredicate(columns, alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  const statusExpr = columns.has("order_status")
+    ? `LOWER(TRIM(COALESCE(${prefix}order_status, '')))`
+    : "''";
+  const paidExpr = columns.has("payment_status")
+    ? `LOWER(TRIM(COALESCE(${prefix}payment_status, ''))) = 'paid'`
+    : "FALSE";
+  const cancelFlags = ["FALSE"];
+  if (columns.has("is_cancelled")) cancelFlags.push(`COALESCE(${prefix}is_cancelled, 0) = 1`);
+  if (columns.has("cancelled_at")) cancelFlags.push(`${prefix}cancelled_at IS NOT NULL`);
+  if (columns.has("canceled_at")) cancelFlags.push(`${prefix}canceled_at IS NOT NULL`);
+
+  return `(
+    NOT (${cancelFlags.join(" OR ")})
+    AND ${statusExpr} NOT IN ('cancelled', 'canceled')
+    AND (
+      ${statusExpr} IN (
+        'confirmed', 'processing', 'ready to ship', 'ready_to_ship',
+        'ready to pickup', 'ready_to_pickup', 'shipped', 'in transit',
+        'in_transit', 'out for delivery', 'out_for_delivery', 'delivered',
+        'completed', 'fulfilled'
+      )
+      OR (
+        ${statusExpr} NOT IN ('', 'new', 'pending')
+        AND ${paidExpr}
+      )
+    )
+  )`;
+}
+
 function paidDateExpression(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
   if (columns.has("payment_date") && columns.has("created_at")) {
@@ -290,6 +326,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const codExpr = codOrderPredicate(columns);
   const confirmedOrderExpr = confirmedOrderPredicate(columns);
+  const deviceConfirmedExpr = deviceConfirmationPredicate(columns);
   const cancelledExpr = cancellationPredicate(
     columns,
     "o",
@@ -333,26 +370,37 @@ async function fetchDashboardStats({ adminId, from, to }) {
      ),
      /*
       * Device quantities and revenue deliberately have different eligibility
-      * rules. Only confirmed orders contribute: a confirmed COD order is a
-      * sale from its creation date, even before collection, while a confirmed
-      * Razorpay order must also be Paid. Revenue remains payment-confirmed
-      * only. Each CTE starts from one order row, so an order can never be
-      * counted twice when its payment or status later changes.
+      * rules. Only confirmation-status Confirmed orders contribute: a confirmed
+      * COD order is a sale from its creation date, even before collection, while
+      * a confirmed Razorpay order must also be Paid. A paid payment does not
+      * promote New or Pending. Revenue remains payment-confirmed only.
+      * order_rows can repeat an order when the shipments or view join matches
+      * more than one row, so quantity is collapsed to one row per order id
+      * before it is summed.
       */
      device_orders AS (
-       SELECT *,
-         CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END AS device_counted_at
-       FROM order_rows
-       WHERE NOT cancellation_evidence
-         AND (
-         (${codExpr} AND ${confirmedOrderExpr})
-         OR (
-           NOT (${codExpr})
-           AND ${paymentStatusExpr} = 'Paid'
-           AND ${confirmedOrderExpr}
-         )
-       )
-       ${paidTestFilter}
+       SELECT
+         id,
+         MAX(device_quantity) AS quantity,
+         MAX(device_counted_at) AS device_counted_at
+       FROM (
+         SELECT
+           id,
+           ${quantityExpr} AS device_quantity,
+           CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END AS device_counted_at
+         FROM order_rows
+         WHERE NOT cancellation_evidence
+           AND ${deviceConfirmedExpr}
+           AND (
+             ${codExpr}
+             OR (
+               NOT (${codExpr})
+               AND LOWER(TRIM(${paymentStatusExpr})) = 'paid'
+             )
+           )
+           ${paidTestFilter}
+       ) device_order_rows
+       GROUP BY id
      ),
      paid_orders AS (
        SELECT *, ${paidDateExpr} AS paid_at
@@ -371,14 +419,14 @@ async function fetchDashboardStats({ adminId, from, to }) {
      ),
     sales AS (
       SELECT
-         CAST(COALESCE((SELECT SUM(${quantityExpr}) FROM device_orders), 0) AS SIGNED) AS devices_sold,
+         CAST(COALESCE((SELECT SUM(quantity) FROM device_orders), 0) AS SIGNED) AS devices_sold,
          CAST(COALESCE((SELECT SUM(${revenueExpr}) FROM paid_orders), 0) AS DECIMAL(12,2)) AS revenue_received,
          CAST(COALESCE(
            (SELECT SUM(CASE
              WHEN device_counted_at IS NOT NULL
                AND device_counted_at >= ${todayStartExpr}
                AND device_counted_at < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
-             THEN ${quantityExpr} ELSE 0 END)
+             THEN quantity ELSE 0 END)
             FROM device_orders),
            0) AS SIGNED) AS today_devices_sold,
          CAST(COALESCE(
@@ -394,7 +442,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
              WHEN device_counted_at IS NOT NULL
                AND device_counted_at >= ${monthStartExpr}
                AND device_counted_at < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)
-             THEN ${quantityExpr} ELSE 0 END)
+             THEN quantity ELSE 0 END)
             FROM device_orders),
            0) AS SIGNED) AS month_devices_sold,
          CAST(COALESCE(
@@ -411,7 +459,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
          /* These three summaries share their contributing CTEs with the
           * preset tiles; only the same explicit IST date range changes. */
          CAST(COALESCE((
-           SELECT SUM(${quantityExpr})
+           SELECT SUM(quantity)
            FROM device_orders
            WHERE (? IS NULL OR device_counted_at >= ${istDateParameterStartExpression("?")})
              AND (? IS NULL OR device_counted_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
