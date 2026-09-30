@@ -17,6 +17,7 @@ import {
   dispatchInventoryAlertEmails,
 } from "./inventoryService.js";
 import { triggerOrderPlacedWhatsAppAsync } from "./interaktOrderPlacedService.js";
+import { scheduleMetaPurchase } from "./metaPurchase.js";
 
 /** Hostinger MySQL: resolve strings in JS — avoid mixed-collation COALESCE/NULLIF in SQL. */
 function coalesceString(...values) {
@@ -273,6 +274,7 @@ export async function confirmCapturedRazorpayPayment({
           reason: "duplicate_webhook_event",
           eventType: webhookEventType,
         });
+        scheduleMetaPurchase(order);
         return { status: "already_paid", order };
       }
     }
@@ -298,9 +300,11 @@ export async function confirmCapturedRazorpayPayment({
         razorpayPaymentId: order.razorpay_payment_id || paymentId,
         eventType: webhookEventType || null,
       });
+      const paidOrder = { ...order, razorpay_payment_id: order.razorpay_payment_id || paymentId };
+      scheduleMetaPurchase(paidOrder);
       return {
         status: "already_paid",
-        order: { ...order, razorpay_payment_id: order.razorpay_payment_id || paymentId },
+        order: paidOrder,
       };
     }
 
@@ -366,6 +370,7 @@ export async function confirmCapturedRazorpayPayment({
           razorpayPaymentId: current.razorpay_payment_id || paymentId,
           reason: "race",
         });
+        scheduleMetaPurchase(current);
         return { status: "already_paid", order: current };
       }
       return { status: "ineligible", order: current };
@@ -434,6 +439,7 @@ export async function confirmCapturedRazorpayPayment({
           razorpayPaymentId: paymentId,
           reason: "unique_payment_id",
         });
+        scheduleMetaPurchase(paid.rows[0]);
         return { status: "already_paid", order: paid.rows[0] };
       }
     }
@@ -476,6 +482,7 @@ export async function confirmCapturedRazorpayPayment({
     isTestOrder: newlyPaid.is_test_order,
   });
 
+  scheduleMetaPurchase(newlyPaid);
   return { status: "marked_paid", order: newlyPaid };
 }
 

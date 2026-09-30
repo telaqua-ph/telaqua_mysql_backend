@@ -13,6 +13,7 @@ import {
 } from "../services/whatsappConsent.js";
 import { logPaymentEvent, reconcileRazorpayOrder, triggerOrderFulfillmentAsync } from "../services/confirmRazorpayPayment.js";
 import { triggerOrderPlacedWhatsAppAsync } from "../services/interaktOrderPlacedService.js";
+import { scheduleMetaPurchase } from "../services/metaPurchase.js";
 import {
   assertStockAvailable,
   dispatchInventoryAlertEmails,
@@ -1364,6 +1365,7 @@ export async function createWebsiteCodOrder(req, res) {
       orderId: orderNumber,
       orderAmount: financial.finalTotal,
     });
+    scheduleMetaPurchase({ id });
 
     return res.status(201).json({
       success: true,

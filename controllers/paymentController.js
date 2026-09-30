@@ -31,6 +31,7 @@ import {
   parseWhatsappConsent,
 } from "../services/whatsappConsent.js";
 import { assertStockAvailable } from "../services/inventoryService.js";
+import { scheduleMetaPurchase } from "../services/metaPurchase.js";
 import {
   canGenerateOrderInvoice,
   ensureSwipeInvoiceForPaidOrder,
@@ -1533,6 +1534,7 @@ export async function verifyPayment(req, res) {
         );
       }
       triggerOrderFulfillmentAsync(paid.id);
+      scheduleMetaPurchase(paid);
       return res.status(200).json(
         buildVerifySuccessResponse(
           paid,
@@ -1552,6 +1554,7 @@ export async function verifyPayment(req, res) {
         );
       }
       triggerOrderFulfillmentAsync(orderRow.id);
+      scheduleMetaPurchase(orderRow);
       return res.status(200).json(
         buildVerifySuccessResponse(
           {
