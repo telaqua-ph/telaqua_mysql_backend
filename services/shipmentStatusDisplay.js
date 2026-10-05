@@ -36,6 +36,11 @@ export function deriveShipmentStatusDisplay(order) {
   const statusCode = String(
     order?.shipment_status_code || order?.tracking_status_code || ""
   ).trim();
+  // A rejected Shipway booking has no AWB; never let it read as a courier status.
+  if ([rawStatus, shipmentStatus].some((value) => /^booking failed$/i.test(value)) &&
+      !hasValue(order?.waybill) && !hasValue(order?.waybill_number)) {
+    return "Booking Failed";
+  }
   const mapped = mapDelhiveryStatus(rawStatus, statusCode);
 
   if (mapped === "ndr" && /undelivered|not delivered/i.test(rawStatus)) {

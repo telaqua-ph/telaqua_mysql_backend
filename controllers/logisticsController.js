@@ -34,7 +34,8 @@ import { canFulfillOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
 import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection } from "../services/shipwayService.js";
+import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection, isHttpUrl } from "../services/shipwayService.js";
+import { DELHIVERY_ONLY_SQL, assertDelhiveryManagedShipment, isShipwayShipment } from "../services/shipmentProvider.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -147,6 +148,9 @@ function apiError(res, error, fallback = "Unable to complete logistics request")
     const status = [400, 401, 403, 404, 409, 422, 429].includes(error.status) ? error.status : 502;
     return res.status(status).json({ success: false, message: error.message || fallback });
   }
+  if (error?.code === "SHIPWAY_MANAGED_SHIPMENT") {
+    return res.status(409).json({ success: false, code: error.code, message: error.message });
+  }
   if (error?.code === "SHIPWAY_CONFIG_ERROR" || error?.code === "SHIPWAY_ORDER_DATA_INVALID") {
     return res.status(503).json({ success: false, message: error.message });
   }
@@ -238,7 +242,7 @@ async function writeAudit(shipmentId, adminId, action, before, after, client = {
 
 async function recordShipmentError(shipmentId, error) {
   if (!shipmentId) return;
-  await query(
+  await pool.query(
     "UPDATE shipments SET last_error=?, last_error_response=?, last_error_at=NOW() WHERE id=?",
     [String(error?.message || "Logistics operation failed").slice(0, 2000), asJson(error?.upstreamBody || null), shipmentId]
   ).catch(() => {});
@@ -265,6 +269,7 @@ export async function acquireShipmentOperation(shipmentId, operation) {
       throw Object.assign(new Error("Shipment not found."), { httpStatus: 404, publicMessage: "Shipment not found." });
     }
     assertShipmentEnvironment(shipment);
+    assertDelhiveryManagedShipment(shipment);
     if (shipment.processing_token && shipment.processing_started_at && Date.now() - new Date(shipment.processing_started_at).getTime() < 10 * 60 * 1000) {
       await client.query("ROLLBACK");
       throw Object.assign(new Error("Another shipment operation is already in progress."), { httpStatus: 409, publicMessage: "Another shipment operation is already in progress." });
@@ -455,6 +460,12 @@ export async function generateWaybill(req, res) {
         return res.status(404).json({ success: false, message: "Order not found." });
       }
       shipment = await shipmentForOrder(orderId, client, true) || await ensureShipment(orderId, client);
+      if (isShipwayShipment(shipment)) {
+        await client.query("ROLLBACK");
+        const managed = shipment;
+        shipment = null;
+        assertDelhiveryManagedShipment(managed);
+      }
       assertShipmentEnvironment(shipment);
       if (shipment.waybill_number) {
         await client.query("COMMIT");
@@ -515,31 +526,73 @@ export async function generateWaybill(req, res) {
   }
 }
 
-async function reconcilePendingShipwayShipment(order, shipment, req) {
-  const age = Date.now() - new Date(shipment.processing_started_at || 0).getTime();
-  if (!shipment.processing_token || age < 30_000) return null;
-  const result = await findShipwayOrder(String(order.order_number || order.id));
-  if (result.state === "confirmed_absent") {
-    const released = await query(
+const SHIPWAY_LOCK_GRACE_MS = 30_000;
+const shipwayOrderNumber = (order) => String(order.order_number || order.id);
+
+/** Persist an AWB + label that already exist in Shipway, guarded by the lock the caller holds (or NULL). */
+async function saveExistingShipwayBooking(order, shipment, lookup, lockToken, req) {
+  const saved = await pool.query(
+    `UPDATE shipments SET provider='Shipway', courier_name=?, carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
+     shipment_created_at=COALESCE(shipment_created_at, NOW()), shipping_label_url=?, label_status='Generated', label_generated_at=COALESCE(label_generated_at, NOW()),
+     shipment_response=?, label_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL
+     WHERE id=? AND waybill_number IS NULL AND processing_token <=> ?`,
+    [lookup.carrierName || "Shipway", lookup.carrierId, lookup.awb, lookup.labelUrl, asJson(lookup.body), asJson(lookup.body), shipment.id, lockToken ?? null]
+  );
+  if (saved.rowCount !== 1) return { status: 409, success: false, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
+  await pool.query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [order.id]);
+  await writeAudit(shipment.id, adminId(req), "shipway_reconciled", null, { waybill: lookup.awb, carrierId: lookup.carrierId, carrierName: lookup.carrierName, labelUrl: lookup.labelUrl }, pool);
+  return { status: 200, success: true, reconciled: true, message: "Existing Shipway AWB and label were saved; the order is Ready to Ship.", shipment_id: shipment.id, waybill: lookup.awb, label_url: lookup.labelUrl };
+}
+
+const hasShipwayArtifacts = (lookup) => Boolean(lookup?.awb && isHttpUrl(lookup?.labelUrl));
+
+function shipwayIncompleteResult(order, lookup) {
+  return {
+    status: 409, success: false, outcome_unknown: true,
+    message: `Shipway contains order ${shipwayOrderNumber(order)}, but ${lookup.awb ? "its label" : "its AWB and label"} is not available. Do not create another shipment. Assign/generate the label in Shipway, then reconcile this order.`,
+  };
+}
+
+/**
+ * Lookup-only reconciliation (getorders). It never calls v2orders, so it can never book.
+ * confirmed_absent releases only the lock it was given; anything unrecognised keeps the lock.
+ */
+async function reconcileShipwayShipment(order, shipment, req) {
+  const lockToken = shipment.processing_token || null;
+  const lookup = await findShipwayOrder(shipwayOrderNumber(order));
+  if (lookup.state === "confirmed_absent") {
+    if (!lockToken) return { status: 200, success: true, reconciled: false, state: "confirmed_absent", message: "Shipway has no order for this order number. Create the shipment to book it." };
+    const released = await pool.query(
       "UPDATE shipments SET processing_token=NULL, processing_started_at=NULL, last_error=? WHERE id=? AND processing_token=?",
-      ["Shipway lookup confirmed no order/AWB exists; safe to retry booking.", shipment.id, shipment.processing_token]
+      ["Shipway lookup confirmed no order/AWB exists; safe to retry booking.", shipment.id, lockToken]
     );
-    if (released.rowCount !== 1) return { status: 409, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
-    return { status: 409, message: "Shipway confirmed that no order or AWB exists for this order. The booking lock was released; click Create Shipment once to retry." };
+    if (released.rowCount !== 1) return { status: 409, success: false, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
+    return { status: 200, success: true, reconciled: false, released: true, retryable: true, state: "confirmed_absent", message: "Shipway confirmed that no order or AWB exists for this order. The booking lock was released; click Create Shipment once to retry." };
   }
-  if (result.awb && result.labelUrl) {
-    const saved = await query(
-      `UPDATE shipments SET provider='Shipway', courier_name=?, carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
-       shipment_created_at=COALESCE(shipment_created_at, NOW()), shipping_label_url=?, label_status='Generated', label_generated_at=COALESCE(label_generated_at, NOW()),
-       shipment_response=?, label_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
-      [result.carrierName || "Shipway", result.carrierId, result.awb, result.labelUrl, asJson(result.body), asJson(result.body), shipment.id, shipment.processing_token]
-    );
-    if (saved.rowCount !== 1) return { status: 409, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
-    await query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [order.id]);
-    await writeAudit(shipment.id, adminId(req), "shipway_reconciled", null, { waybill: result.awb, carrierId: result.carrierId, carrierName: result.carrierName, labelUrl: result.labelUrl });
-    return { status: 200, success: true, message: "Existing Shipway AWB and label were saved; the order is Ready to Ship.", waybill: result.awb, label_url: result.labelUrl, reconciled: true };
+  if (hasShipwayArtifacts(lookup)) return saveExistingShipwayBooking(order, shipment, lookup, lockToken, req);
+  return shipwayIncompleteResult(order, lookup);
+}
+
+export async function reconcileOrderShipment(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  let shipment = null;
+  try {
+    const found = await pool.query("SELECT * FROM orders WHERE id = ? LIMIT 1", [orderId]);
+    const order = found.rows[0];
+    if (!order) return res.status(404).json({ success: false, message: "Order not found." });
+    const rows = await pool.query("SELECT * FROM shipments WHERE order_id = ? AND sequence_no = 1 LIMIT 1", [orderId]);
+    shipment = rows.rows[0] || null;
+    if (!shipment || !isShipwayShipment(shipment)) return res.status(409).json({ success: false, message: "This order has no Shipway shipment to reconcile." });
+    if (shipment.waybill_number) return res.json({ success: true, already_reconciled: true, shipment_id: shipment.id, waybill: shipment.waybill_number, label_url: shipment.shipping_label_url });
+    const age = Date.now() - new Date(shipment.processing_started_at || 0).getTime();
+    if (shipment.processing_token && age < SHIPWAY_LOCK_GRACE_MS) return res.status(409).json({ success: false, message: "Shipment creation is already in progress." });
+    const result = await reconcileShipwayShipment(order, shipment, req);
+    return res.status(result.status).json(result);
+  } catch (error) {
+    await recordShipmentError(shipment?.id, error);
+    return apiError(res, error, "Unable to reconcile shipment");
   }
-  return { status: 409, message: `Shipway contains order ${order.order_number || order.id}, but ${result.awb ? "its label" : "its AWB and label"} is not available. Do not create another shipment. Assign/generate the label in Shipway, then retry this action to reconcile it.` };
 }
 
 export async function createOrderShipment(req, res) {
@@ -550,6 +603,7 @@ export async function createOrderShipment(req, res) {
   let clientReleased = false;
   let shipment;
   let order;
+  let previousShipwayAttempt = false;
   try {
     await client.query("BEGIN");
     const found = await client.query("SELECT * FROM orders WHERE id=? LIMIT 1 FOR UPDATE", [orderId]);
@@ -557,18 +611,25 @@ export async function createOrderShipment(req, res) {
     if (!order) { await client.query("ROLLBACK"); return res.status(404).json({ success: false, message: "Order not found." }); }
     if (!canFulfillOrder(order)) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Only paid prepaid orders, or COD orders that are Pending or Paid, can be fulfilled." }); }
     shipment = await shipmentForOrder(orderId, client, true) || await ensureShipment(orderId, client);
+    if (isShipwayShipment(shipment) && shipment.waybill_number) {
+      await client.query("COMMIT");
+      return res.json({ success: true, already_created: true, message: "Shipment is already Ready to Ship in Shipway.", shipment_id: shipment.id, waybill: shipment.waybill_number, label_url: shipment.shipping_label_url });
+    }
     // A legacy order-level AWB or a Delhivery shipment must never be moved to Shipway.
     const active = order.waybill || order.delhivery_shipment_id || order.shipment_created_at ||
-      shipment.waybill_number || shipment.shipment_id || shipment.shipment_created_at;
+      shipment.waybill_number || shipment.shipment_id || shipment.shipment_created_at ||
+      String(shipment.provider ?? "").trim().toLowerCase() === "delhivery";
     if (active) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "An active shipment or AWB already exists for this order. It was not sent to Shipway.", shipment }); }
     if (shipment.processing_token) {
       await client.query("COMMIT");
       client.release();
       clientReleased = true;
-      const reconciled = await reconcilePendingShipwayShipment(order, shipment, req);
-      if (reconciled) return res.status(reconciled.status).json(reconciled);
-      return res.status(409).json({ success: false, message: "Shipment creation is already in progress." });
+      const age = Date.now() - new Date(shipment.processing_started_at || 0).getTime();
+      if (age < SHIPWAY_LOCK_GRACE_MS) return res.status(409).json({ success: false, message: "Shipment creation is already in progress." });
+      const reconciled = await reconcileShipwayShipment(order, shipment, req);
+      return res.status(reconciled.status).json(reconciled);
     }
+    previousShipwayAttempt = isShipwayShipment(shipment);
     await client.query("UPDATE shipments SET provider='Shipway', courier_name='Shipway', processing_token=?, processing_started_at=NOW(), last_error=NULL WHERE id=?", [token, shipment.id]);
     await client.query("COMMIT");
   } catch (error) {
@@ -576,27 +637,51 @@ export async function createOrderShipment(req, res) {
       await client.query("ROLLBACK").catch(() => {});
       client.release();
     }
+    if (clientReleased) await recordShipmentError(shipment?.id, error);
     return apiError(res, error, "Unable to prepare shipment");
   }
   if (!clientReleased) client.release();
 
+  // A previous attempt may have reached Shipway. Look it up first; never book blindly over it.
+  if (previousShipwayAttempt) {
+    let lookup;
+    try {
+      lookup = await findShipwayOrder(shipwayOrderNumber(order));
+    } catch (error) {
+      await pool.query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
+      await recordShipmentError(shipment.id, error);
+      return apiError(res, error, "Shipway lookup failed; the shipment was not booked.");
+    }
+    if (lookup.state !== "confirmed_absent") {
+      try {
+        const result = hasShipwayArtifacts(lookup)
+          ? await saveExistingShipwayBooking(order, shipment, lookup, token, req)
+          : shipwayIncompleteResult(order, lookup);
+        return res.status(result.status).json(result);
+      } catch (error) {
+        await recordShipmentError(shipment.id, error);
+        return apiError(res, error, "Unable to save the existing Shipway shipment");
+      }
+    }
+  }
+
   try {
     const payload = buildShipwayPayload(order, getTelaquaProductDefaults());
     const { body: data, booking } = await createShipwayShipment(payload);
-    await query(
+    await pool.query(
       `UPDATE shipments SET provider='Shipway', courier_name=?, carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
        shipment_created_at=NOW(), shipping_label_url=?, label_status='Generated', label_generated_at=NOW(), shipment_response=?, label_response=?,
        processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
       [booking.carrierName || "Shipway", booking.carrierId, booking.awb, booking.labelUrl, asJson(data), asJson(data.awb_response), shipment.id, token]
     );
-    await query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [orderId]);
-    await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl });
+    await pool.query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [orderId]);
+    await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl }, pool);
     return res.status(201).json({ success: true, message: "Shipment is Ready to Ship.", shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, data });
   } catch (error) {
     // Explicit Shipway rejection without an AWB/label is safe to retry. Timeouts and
     // ambiguous partial responses remain locked for read-only reconciliation.
     if (isDefinitiveShipwayBookingRejection(error)) {
-      await query(
+      await pool.query(
         `UPDATE shipments SET provider='Shipway', courier_name='Shipway', carrier_id=NULL, waybill_number=NULL,
          fulfillment_status='unfulfilled', shipment_status='Booking Failed', shipment_created_at=NULL,
          shipping_label_url=NULL, label_status='Failed', label_generated_at=NULL,
@@ -604,7 +689,7 @@ export async function createOrderShipment(req, res) {
         [shipment.id, token]
       ).catch(() => {});
     } else if (!['SHIPWAY_OUTCOME_UNKNOWN', 'SHIPWAY_PARTIAL_OR_REJECTED'].includes(error?.code)) {
-      await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
+      await pool.query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
     }
     await recordShipmentError(shipment.id, error);
     return apiError(res, error, "Shipment creation failed");
@@ -768,14 +853,14 @@ export async function refreshTracking(req, res) {
 export async function refreshActiveTracking(req, res) {
   try {
     const limit = Math.min(50, Math.max(1, Number(req.body?.limit) || 20));
-    const found = await query(
+    const found = await pool.query(
       `SELECT * FROM shipments WHERE waybill_number IS NOT NULL
        AND fulfillment_status COLLATE utf8mb4_unicode_ci NOT IN (
          'delivered' COLLATE utf8mb4_unicode_ci,
          'cancelled' COLLATE utf8mb4_unicode_ci,
          'returned' COLLATE utf8mb4_unicode_ci
        )
-       AND environment=? AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 15 MINUTE)) ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT ${limit}`,
+       AND environment=? AND ${DELHIVERY_ONLY_SQL} AND (last_tracking_update IS NULL OR last_tracking_update < DATE_SUB(NOW(), INTERVAL 15 MINUTE)) ORDER BY COALESCE(last_tracking_update, created_at) ASC LIMIT ${limit}`,
       [getDelhiveryEnvironment()]
     );
     const results = [];
@@ -804,6 +889,12 @@ export async function pickupShipment(req, res) {
       await client.query("BEGIN");
       shipment = await shipmentById(idOf(req.params.shipmentId), client, true);
       if (!shipment) { await client.query("ROLLBACK"); return res.status(404).json({ success: false, message: "Shipment not found." }); }
+      if (isShipwayShipment(shipment)) {
+        await client.query("ROLLBACK");
+        const managed = shipment;
+        shipment = null;
+        assertDelhiveryManagedShipment(managed);
+      }
       assertShipmentEnvironment(shipment);
       if (shipment.pickup_requested_at) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "Pickup has already been requested.", shipment }); }
       if (!shipment.shipment_created_at || !shipment.waybill_number) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "A created shipment with an AWB is required before requesting pickup." }); }

@@ -13,6 +13,7 @@ import {
   getShipmentTracking,
   getWarehouse,
   pickupShipment,
+  reconcileOrderShipment,
   refreshActiveTracking,
   refreshTracking,
   submitNdr,
@@ -30,6 +31,7 @@ router.get("/warehouse", getWarehouse);
 router.post("/warehouse", createWarehouse);
 router.get("/orders/:orderId", getOrderLogistics);
 router.post("/orders/:orderId/shipment", createOrderShipment);
+router.post("/orders/:orderId/shipment/reconcile", reconcileOrderShipment);
 router.get("/shipments/:shipmentId", getShipment);
 router.post("/shipments/:shipmentId/pickup", pickupShipment);
 router.post("/shipments/track-active", refreshActiveTracking);

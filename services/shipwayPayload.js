@@ -9,6 +9,19 @@ const splitName = (name) => {
   return { first: parts.shift() || "Customer", last: parts.join(" ") || "." };
 };
 
+/**
+ * Carrier selection is optional: without carrier_id Shipway auto-assigns using the
+ * account's courier priority rules. Never repurpose a warehouse ID as a courier ID.
+ */
+export function configuredCarrierId(config) {
+  const raw = String(process.env.SHIPWAY_CARRIER_ID ?? "").trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const id = Number(raw);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  if (id === Number(config.warehouseId) || id === Number(config.returnWarehouseId)) return null;
+  return id;
+}
+
 /** Build Shipway v2orders payload solely from stored order data and product defaults. */
 export function buildShipwayPayload(order, product) {
   const config = getShipwayConfig();
@@ -49,7 +62,6 @@ export function buildShipwayPayload(order, product) {
       discount: "0",
     }],
     payment_type: isCodOrder(order) ? "C" : "P",
-    email: text(order.email) || undefined,
     order_total: String(total),
     shipping_firstname: first,
     shipping_lastname: last,
@@ -65,10 +77,9 @@ export function buildShipwayPayload(order, product) {
     box_height: String(height),
     order_date: new Date(order.created_at || Date.now()).toISOString().slice(0, 19).replace("T", " "),
   };
-  // Carrier selection is optional. Do not ever repurpose a warehouse ID as a courier ID.
-  const rawCarrierId = String(process.env.SHIPWAY_CARRIER_ID || '').trim();
-  if (/^\d+$/.test(rawCarrierId) && rawCarrierId !== "0" && rawCarrierId !== config.warehouseId) {
-    payload.carrier_id = rawCarrierId;
-  }
+  const email = text(order.email);
+  if (email) payload.email = email;
+  const carrierId = configuredCarrierId(config);
+  if (carrierId !== null) payload.carrier_id = carrierId;
   return payload;
 }

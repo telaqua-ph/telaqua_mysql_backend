@@ -5,7 +5,7 @@
 
 import { isCodOrder } from "./paymentMode.js";
 
-const EMPTY_SHIPMENT_STATUSES = new Set(["", "not created", "pending", "none"]);
+const EMPTY_SHIPMENT_STATUSES = new Set(["", "not created", "pending", "none", "booking failed"]);
 const OPEN_FULFILLMENT = new Set(["", "unfulfilled", "cancelled"]);
 
 function hasValue(value) {

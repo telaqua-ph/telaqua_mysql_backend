@@ -34,7 +34,7 @@ test("Shipway payload uses stored order values and configured Shipway warehouses
 
 test("Shipway carrier_id is omitted unless a verified numeric value is configured", () => {
   env.SHIPWAY_CARRIER_ID = "3411";
-  assert.equal(buildShipwayPayload(order, product).carrier_id, "3411");
+  assert.strictEqual(buildShipwayPayload(order, product).carrier_id, 3411);
   env.SHIPWAY_CARRIER_ID = "   ";
   assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
   env.SHIPWAY_CARRIER_ID = "undefined";

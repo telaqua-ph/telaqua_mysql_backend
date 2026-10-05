@@ -1,6 +1,7 @@
 import { query } from "../config/db.js";
 import { refreshOneShipment } from "../controllers/logisticsController.js";
 import { getDelhiveryEnvironment } from "../config/delhiveryConfig.js";
+import { DELHIVERY_ONLY_SQL } from "./shipmentProvider.js";
 import {
   isDelhiveryThrottledError,
   isDelhiveryWaybillMissingError,
@@ -31,6 +32,7 @@ async function runTrackingSync() {
       `SELECT * FROM shipments
        WHERE waybill_number IS NOT NULL
          AND environment = ?
+         AND ${DELHIVERY_ONLY_SQL}
          AND fulfillment_status COLLATE utf8mb4_unicode_ci NOT IN (
            'delivered' COLLATE utf8mb4_unicode_ci,
            'cancelled' COLLATE utf8mb4_unicode_ci,
