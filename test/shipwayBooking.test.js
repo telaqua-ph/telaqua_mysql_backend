@@ -18,6 +18,7 @@ const order = {
 };
 
 test("Shipway payload uses stored order values and configured Shipway warehouses", () => {
+  delete env.SHIPWAY_CARRIER_ID;
   const payload = buildShipwayPayload(order, product);
   assert.equal(payload.order_id, "TAQ-000042");
   assert.equal(payload.warehouse_id, "109177");
@@ -27,11 +28,24 @@ test("Shipway payload uses stored order values and configured Shipway warehouses
   assert.equal(payload.products[0].price, "499");
   assert.equal(payload.order_weight, "700");
   assert.equal(payload.box_breadth, "20");
+  assert.equal(Object.hasOwn(payload, "carrier_id"), false);
+});
+
+test("Shipway carrier_id is omitted unless a verified numeric value is configured", () => {
+  env.SHIPWAY_CARRIER_ID = "3411";
+  assert.equal(buildShipwayPayload(order, product).carrier_id, "3411");
+  env.SHIPWAY_CARRIER_ID = "   ";
+  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
+  env.SHIPWAY_CARRIER_ID = "undefined";
+  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
+  env.SHIPWAY_CARRIER_ID = "Shipway-Delhivery";
+  assert.throws(() => buildShipwayPayload(order, product), { code: "SHIPWAY_CONFIG_ERROR" });
+  delete env.SHIPWAY_CARRIER_ID;
 });
 
 test("Shipway success requires both booking and label-generation responses", () => {
   const booking = assertShipwayBookingSucceeded({ success: true, awb_response: { success: true, AWB: "SW123", carrier_id: "3411", shipping_url: "https://labels.example/SW123.pdf" } });
-  assert.deepEqual(booking, { awb: "SW123", carrierId: "3411", labelUrl: "https://labels.example/SW123.pdf" });
+  assert.deepEqual(booking, { awb: "SW123", carrierId: "3411", carrierName: null, labelUrl: "https://labels.example/SW123.pdf" });
   assert.throws(() => assertShipwayBookingSucceeded({ message: "Carrier unavailable", success: true, awb_response: { success: false } }), { code: "SHIPWAY_PARTIAL_OR_REJECTED", message: /Carrier unavailable/ });
 });
 

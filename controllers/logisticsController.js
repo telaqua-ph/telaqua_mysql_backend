@@ -526,14 +526,14 @@ async function reconcilePendingShipwayShipment(order, shipment, req) {
   }
   if (result.awb && result.labelUrl) {
     const saved = await query(
-      `UPDATE shipments SET provider='Shipway', courier_name='Shipway', carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
+      `UPDATE shipments SET provider='Shipway', courier_name=?, carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
        shipment_created_at=COALESCE(shipment_created_at, NOW()), shipping_label_url=?, label_status='Generated', label_generated_at=COALESCE(label_generated_at, NOW()),
        shipment_response=?, label_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
-      [result.carrierId, result.awb, result.labelUrl, asJson(result.body), asJson(result.body), shipment.id, shipment.processing_token]
+      [result.carrierName || "Shipway", result.carrierId, result.awb, result.labelUrl, asJson(result.body), asJson(result.body), shipment.id, shipment.processing_token]
     );
     if (saved.rowCount !== 1) return { status: 409, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
     await query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [order.id]);
-    await writeAudit(shipment.id, adminId(req), "shipway_reconciled", null, { waybill: result.awb, carrierId: result.carrierId, labelUrl: result.labelUrl });
+    await writeAudit(shipment.id, adminId(req), "shipway_reconciled", null, { waybill: result.awb, carrierId: result.carrierId, carrierName: result.carrierName, labelUrl: result.labelUrl });
     return { status: 200, success: true, message: "Existing Shipway AWB and label were saved; the order is Ready to Ship.", waybill: result.awb, label_url: result.labelUrl, reconciled: true };
   }
   return { status: 409, message: `Shipway contains order ${order.order_number || order.id}, but ${result.awb ? "its label" : "its AWB and label"} is not available. Do not create another shipment. Assign/generate the label in Shipway, then retry this action to reconcile it.` };
@@ -581,13 +581,13 @@ export async function createOrderShipment(req, res) {
     const payload = buildShipwayPayload(order, getTelaquaProductDefaults());
     const { body: data, booking } = await createShipwayShipment(payload);
     await query(
-      `UPDATE shipments SET provider='Shipway', carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
+      `UPDATE shipments SET provider='Shipway', courier_name=?, carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
        shipment_created_at=NOW(), shipping_label_url=?, label_status='Generated', label_generated_at=NOW(), shipment_response=?, label_response=?,
        processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
-      [booking.carrierId, booking.awb, booking.labelUrl, asJson(data), asJson(data.awb_response), shipment.id, token]
+      [booking.carrierName || "Shipway", booking.carrierId, booking.awb, booking.labelUrl, asJson(data), asJson(data.awb_response), shipment.id, token]
     );
     await query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [orderId]);
-    await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, labelUrl: booking.labelUrl });
+    await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl });
     return res.status(201).json({ success: true, message: "Shipment is Ready to Ship.", shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, data });
   } catch (error) {
     // A timeout or partial Shipway response can have booked an order upstream. Keep the

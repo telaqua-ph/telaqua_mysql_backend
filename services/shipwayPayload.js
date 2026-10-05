@@ -41,6 +41,7 @@ export function buildShipwayPayload(order, product) {
     order_id: mandatory.order_id,
     warehouse_id: config.warehouseId,
     return_warehouse_id: config.returnWarehouseId,
+    ...(config.carrierId ? { carrier_id: config.carrierId } : {}),
     products: [{
       product: text(product.name) || "Tel-Aqua Product",
       product_code: text(process.env.TELAQUA_PRODUCT_SKU) || DEFAULT_PRODUCT_SKU,
