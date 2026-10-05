@@ -5,6 +5,7 @@
 import { Router } from "express";
 import {
   listOrders,
+  exportOrders,
   createOrder,
   createManualCodOrder,
   createWebsiteCodOrder,
@@ -32,6 +33,7 @@ import { requireActiveAdmin } from "../middleware/requireActiveAdmin.js";
 const router = Router();
 
 router.get("/", requireAuth, listOrders);
+router.post("/export", requireAuth, exportOrders);
 router.post("/", createOrder);
 router.post("/website-cod", createWebsiteCodOrder);
 router.post("/manual-cod", requireAuth, createManualCodOrder);

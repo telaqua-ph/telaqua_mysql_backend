@@ -185,6 +185,109 @@ function withDisplayStatuses(order) {
   };
 }
 
+const EXPORT_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const exportText = (value) => String(value ?? "").trim();
+const exportDate = (value) => {
+  const raw = exportText(value);
+  const mysqlDate = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (mysqlDate) return mysqlDate[1];
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+};
+
+function exportShipmentLabel(order) {
+  const status = exportText(order.fulfillment_status).toLowerCase();
+  const shipment = exportText(order.shipment_status).toLowerCase();
+  const tracking = exportText(order.tracking_status).toLowerCase();
+  if (status === "unfulfilled" && !order.waybill && !order.shipment_error) return "Unfulfilled";
+  if (status === "ready_to_ship" || order.waybill) return "Ready to Ship";
+  if (status === "pickup_requested") return "Pickup Requested";
+  if (status === "picked_up") return "Picked Up";
+  if (status === "in_transit") return "In Transit";
+  if (status === "out_for_delivery") return "Out for Delivery";
+  if (status === "delivered") return "Delivered";
+  if (status === "ndr" || shipment.includes("ndr") || tracking.includes("ndr")) return "NDR / Exceptions";
+  if (status === "rto") return "RTO / Returning";
+  if (status === "returned") return "Returned";
+  if (status === "delivery_failed" || shipment.includes("fail") || tracking.includes("fail") || order.shipment_error) return "Failed";
+  return "Shipment Created";
+}
+
+function matchesExportMetric(order, metric) {
+  if (!metric) return true;
+  const status = exportText(order.order_status || order.status).toLowerCase();
+  const payment = exportText(order.payment_status).toLowerCase();
+  const mode = exportText(order.payment_mode).toLowerCase();
+  const cancelled = Number(order.is_cancelled) === 1 || status === "cancelled";
+  const rto = ["rto", "returned"].includes(exportText(order.fulfillment_status).toLowerCase());
+  const confirmed = deriveOrderConfirmationStatus(order) === "Confirmed" && !cancelled;
+  if (metric === "new") return ["new", "pending"].includes(status);
+  if (metric === "sales_devices") return confirmed && !rto && payment === "paid";
+  if (metric === "sales_cod_pending_devices") return confirmed && !rto && mode === "cod" && payment !== "paid";
+  if (metric === "sales_revenue_received") return payment === "paid" && !cancelled;
+  if (metric === "sales_pending_revenue") return confirmed && mode === "cod" && payment === "pending";
+  if (metric === "shipments_created") return exportShipmentLabel(order) === "Shipment Created";
+  return true;
+}
+
+/** Server-side export guard. Selected IDs never bypass the active filters. */
+export function filterOrdersForExport(rows, input = {}) {
+  const filters = input && typeof input === "object" ? input : {};
+  const selectedIds = Array.isArray(filters.selectedOrderIds)
+    ? new Set(filters.selectedOrderIds.map((id) => String(id)).filter((id) => /^\d+$/.test(id)))
+    : new Set();
+  const allTime = filters.allTime === true;
+  const startDate = EXPORT_DATE.test(filters.startDate || "") ? filters.startDate : "";
+  const endDate = EXPORT_DATE.test(filters.endDate || "") ? filters.endDate : "";
+  const search = exportText(filters.search).toLowerCase();
+  const status = exportText(filters.statusFilter || "All");
+  const payment = exportText(filters.paymentFilter || "All");
+  const paymentMode = exportText(filters.paymentModeFilter || "All");
+  const shipment = exportText(filters.shipmentFilter || "All");
+  const metric = exportText(filters.metricFilter);
+  const hasActiveFilter = Boolean(startDate || endDate || search || metric || filters.unseenOnly === true ||
+    status !== "All" || payment !== "All" || paymentMode !== "All" || shipment !== "All");
+  if (!allTime && selectedIds.size === 0 && !hasActiveFilter) return [];
+
+  return rows.filter((order) => {
+    const createdDate = exportDate(order.created_at);
+    if ((startDate && createdDate < startDate) || (endDate && createdDate > endDate)) return false;
+    if (selectedIds.size && !selectedIds.has(String(order.id))) return false;
+    if (!matchesExportMetric(order, metric)) return false;
+    if (status !== "All" && deriveOrderConfirmationStatus(order) !== status) return false;
+    if (payment !== "All" && exportText(order.payment_status) !== payment) return false;
+    const normalizedMode = String(order.payment_mode || order.paymentMethod || "razorpay").toLowerCase() === "cod" ? "COD" : "Razorpay";
+    if (paymentMode !== "All" && normalizedMode !== paymentMode) return false;
+    if (shipment !== "All" && exportShipmentLabel(order) !== shipment) return false;
+    if (filters.unseenOnly === true && Boolean(order.is_seen)) return false;
+    if (search) {
+      const haystack = [order.order_number, order.customer_name, order.phone, order.email, order.product_name, order.waybill, order.promo_code, order.city]
+        .map((value) => exportText(value).toLowerCase()).join(" ");
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+}
+
+async function loadOrdersForAdmin(adminId) {
+  let rows;
+  try {
+    const result = await query(
+      `SELECT o.*, (aov.order_id IS NOT NULL) AS is_seen, aov.first_viewed_at, aov.last_viewed_at
+       FROM orders o LEFT JOIN admin_order_views aov ON aov.order_id = o.id AND aov.admin_id = ?
+       ORDER BY o.created_at DESC, o.id DESC LIMIT 2000`, [adminId]
+    );
+    rows = result.rows;
+  } catch (joinError) {
+    if (joinError?.code !== "ER_NO_SUCH_TABLE" || !String(joinError?.message || "").includes("admin_order_views")) throw joinError;
+    rows = (await query("SELECT o.*, 0 AS is_seen, NULL AS first_viewed_at, NULL AS last_viewed_at FROM orders o ORDER BY o.created_at DESC, o.id DESC LIMIT 2000")).rows;
+  }
+  return (await attachCancellationFlags(await attachLatestShipments(rows))).map(withDisplayStatuses);
+}
+
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
@@ -563,47 +666,7 @@ export async function listOrders(req, res) {
   }
 
   try {
-    let rows;
-    try {
-      const result = await query(
-        `SELECT
-           o.*,
-           (aov.order_id IS NOT NULL) AS is_seen,
-           aov.first_viewed_at,
-           aov.last_viewed_at
-         FROM orders o
-         LEFT JOIN admin_order_views aov
-           ON aov.order_id = o.id
-          AND aov.admin_id = ?
-         ORDER BY o.created_at DESC, o.id DESC
-         LIMIT 2000`,
-        [adminId]
-      );
-      rows = result.rows;
-    } catch (joinError) {
-      if (
-        joinError?.code === "ER_NO_SUCH_TABLE" &&
-        String(joinError?.message || "").includes("admin_order_views")
-      ) {
-        const fallback = await query(
-          `SELECT
-             o.*,
-             0 AS is_seen,
-             NULL AS first_viewed_at,
-             NULL AS last_viewed_at
-           FROM orders o
-           ORDER BY o.created_at DESC, o.id DESC
-           LIMIT 2000`
-        );
-        rows = fallback.rows;
-      } else {
-        throw joinError;
-      }
-    }
-
-    rows = await attachLatestShipments(rows);
-    rows = await attachCancellationFlags(rows);
-    rows = rows.map(withDisplayStatuses);
+    const rows = await loadOrdersForAdmin(adminId);
     return res.status(200).json({
       success: true,
       orders: rows,
@@ -618,6 +681,27 @@ export async function listOrders(req, res) {
       success: false,
       message: "Internal server error",
     });
+  }
+}
+
+/** POST /api/orders/export â€” validated export rows for the Orders page. */
+export async function exportOrders(req, res) {
+  const adminId = currentAdminId(req);
+  if (!adminId) return res.status(401).json({ success: false, message: "Unauthorized" });
+  try {
+    const body = req.body || {};
+    if ((body.startDate && !EXPORT_DATE.test(body.startDate)) || (body.endDate && !EXPORT_DATE.test(body.endDate))) {
+      return res.status(422).json({ success: false, message: "Export dates must use YYYY-MM-DD." });
+    }
+    if (body.startDate && body.endDate && body.startDate > body.endDate) {
+      return res.status(422).json({ success: false, message: "Export start date cannot be after the end date." });
+    }
+    const orders = filterOrdersForExport(await loadOrdersForAdmin(adminId), body);
+    if (!orders.length) return res.status(422).json({ success: false, message: "No orders match the current export selection and filters." });
+    return res.status(200).json({ success: true, orders, count: orders.length });
+  } catch (error) {
+    console.error("Orders export API error:", error);
+    return res.status(500).json({ success: false, message: "Unable to prepare the order export." });
   }
 }
 
