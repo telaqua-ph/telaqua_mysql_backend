@@ -5,6 +5,11 @@ const positiveId = (name) => {
     error.code = "SHIPWAY_CONFIG_ERROR";
     throw error;
   }
+  if (value !== "109177") {
+    const error = new Error(`${name} must be 109177 for the configured Shipway dashboard warehouse`);
+    error.code = "SHIPWAY_CONFIG_ERROR";
+    throw error;
+  }
   return value;
 };
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { assertShipwayBookingSucceeded } from "../services/shipwayService.js";
+import { assertShipwayBookingSucceeded, createShipwayShipment, findShipwayOrder } from "../services/shipwayService.js";
 
 const env = process.env;
 env.SHIPWAY_EMAIL = "merchant@example.test";
@@ -32,5 +32,35 @@ test("Shipway payload uses stored order values and configured Shipway warehouses
 test("Shipway success requires both booking and label-generation responses", () => {
   const booking = assertShipwayBookingSucceeded({ success: true, awb_response: { success: true, AWB: "SW123", carrier_id: "3411", shipping_url: "https://labels.example/SW123.pdf" } });
   assert.deepEqual(booking, { awb: "SW123", carrierId: "3411", labelUrl: "https://labels.example/SW123.pdf" });
-  assert.throws(() => assertShipwayBookingSucceeded({ success: true, awb_response: { success: false } }), { code: "SHIPWAY_PARTIAL_OR_REJECTED" });
+  assert.throws(() => assertShipwayBookingSucceeded({ message: "Carrier unavailable", success: true, awb_response: { success: false } }), { code: "SHIPWAY_PARTIAL_OR_REJECTED", message: /Carrier unavailable/ });
+});
+
+test("Shipway rejected booking retains its safe upstream error", async () => {
+  const prior = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ message: "Invalid pincode" }), { status: 422 });
+  await assert.rejects(() => createShipwayShipment({ order_id: "TAQ-000873" }), { code: "SHIPWAY_UPSTREAM_ERROR", message: /Invalid pincode/ });
+  globalThis.fetch = prior;
+});
+
+test("Shipway lookup finds an existing AWB and label without booking again", async () => {
+  const prior = globalThis.fetch;
+  let calledUrl = "";
+  globalThis.fetch = async (url) => {
+    calledUrl = String(url);
+    return new Response(JSON.stringify({ orders: [{ order_id: "TAQ-000873", awb_number: "SW123", carrier_id: "3411", shipping_url: "https://labels.example/SW123.pdf" }] }), { status: 200 });
+  };
+  const found = await findShipwayOrder("TAQ-000873");
+  assert.equal(found.state, "exists");
+  assert.equal(found.awb, "SW123");
+  assert.match(calledUrl, /getorders/);
+  assert.doesNotMatch(calledUrl, /v2orders/);
+  globalThis.fetch = prior;
+});
+
+test("Shipway lookup confirms absence before a retry can be enabled", async () => {
+  const prior = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ orders: [] }), { status: 200 });
+  const found = await findShipwayOrder("TAQ-000873");
+  assert.equal(found.state, "confirmed_absent");
+  globalThis.fetch = prior;
 });

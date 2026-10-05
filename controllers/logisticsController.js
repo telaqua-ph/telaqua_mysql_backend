@@ -34,7 +34,7 @@ import { canFulfillOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
 import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { createShipwayShipment } from "../services/shipwayService.js";
+import { createShipwayShipment, findShipwayOrder } from "../services/shipwayService.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -151,7 +151,10 @@ function apiError(res, error, fallback = "Unable to complete logistics request")
     return res.status(503).json({ success: false, message: error.message });
   }
   if (error?.code === "SHIPWAY_OUTCOME_UNKNOWN" || error?.code === "SHIPWAY_PARTIAL_OR_REJECTED") {
-    return res.status(409).json({ success: false, outcome_unknown: true, message: "Shipway booking is not confirmed. Do not retry; verify Shipway Ready to Ship, then contact support to reconcile this order." });
+    return res.status(409).json({ success: false, outcome_unknown: true, message: error.message || "Shipway booking is not confirmed. Do not retry; verify Shipway Ready to Ship, then contact support to reconcile this order." });
+  }
+  if (error?.code === "SHIPWAY_RECONCILIATION_FAILED") {
+    return res.status(409).json({ success: false, outcome_unknown: true, message: error.message });
   }
   if (error?.code === "SHIPWAY_UPSTREAM_ERROR") {
     return res.status([400, 401, 403, 409, 422, 429].includes(error.status) ? error.status : 502).json({ success: false, message: error.message || "Shipway rejected the shipment." });
@@ -509,11 +512,39 @@ export async function generateWaybill(req, res) {
   }
 }
 
+async function reconcilePendingShipwayShipment(order, shipment, req) {
+  const age = Date.now() - new Date(shipment.processing_started_at || 0).getTime();
+  if (!shipment.processing_token || age < 30_000) return null;
+  const result = await findShipwayOrder(String(order.order_number || order.id));
+  if (result.state === "confirmed_absent") {
+    const released = await query(
+      "UPDATE shipments SET processing_token=NULL, processing_started_at=NULL, last_error=? WHERE id=? AND processing_token=?",
+      ["Shipway lookup confirmed no order/AWB exists; safe to retry booking.", shipment.id, shipment.processing_token]
+    );
+    if (released.rowCount !== 1) return { status: 409, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
+    return { status: 409, message: "Shipway confirmed that no order or AWB exists for this order. The booking lock was released; click Create Shipment once to retry." };
+  }
+  if (result.awb && result.labelUrl) {
+    const saved = await query(
+      `UPDATE shipments SET provider='Shipway', courier_name='Shipway', carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
+       shipment_created_at=COALESCE(shipment_created_at, NOW()), shipping_label_url=?, label_status='Generated', label_generated_at=COALESCE(label_generated_at, NOW()),
+       shipment_response=?, label_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
+      [result.carrierId, result.awb, result.labelUrl, asJson(result.body), asJson(result.body), shipment.id, shipment.processing_token]
+    );
+    if (saved.rowCount !== 1) return { status: 409, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
+    await query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [order.id]);
+    await writeAudit(shipment.id, adminId(req), "shipway_reconciled", null, { waybill: result.awb, carrierId: result.carrierId, labelUrl: result.labelUrl });
+    return { status: 200, success: true, message: "Existing Shipway AWB and label were saved; the order is Ready to Ship.", waybill: result.awb, label_url: result.labelUrl, reconciled: true };
+  }
+  return { status: 409, message: `Shipway contains order ${order.order_number || order.id}, but ${result.awb ? "its label" : "its AWB and label"} is not available. Do not create another shipment. Assign/generate the label in Shipway, then retry this action to reconcile it.` };
+}
+
 export async function createOrderShipment(req, res) {
   const orderId = idOf(req.params.orderId || req.body?.order_id || req.body?.orderId);
   if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
   const token = crypto.randomUUID();
   const client = await pool.connect();
+  let clientReleased = false;
   let shipment;
   let order;
   try {
@@ -528,14 +559,23 @@ export async function createOrderShipment(req, res) {
       shipment.waybill_number || shipment.shipment_id || shipment.shipment_created_at;
     if (active) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "An active shipment or AWB already exists for this order. It was not sent to Shipway.", shipment }); }
     if (shipment.processing_token) {
-      await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Shipment creation is already in progress." });
+      await client.query("COMMIT");
+      client.release();
+      clientReleased = true;
+      const reconciled = await reconcilePendingShipwayShipment(order, shipment, req);
+      if (reconciled) return res.status(reconciled.status).json(reconciled);
+      return res.status(409).json({ success: false, message: "Shipment creation is already in progress." });
     }
     await client.query("UPDATE shipments SET provider='Shipway', courier_name='Shipway', processing_token=?, processing_started_at=NOW(), last_error=NULL WHERE id=?", [token, shipment.id]);
     await client.query("COMMIT");
   } catch (error) {
-    await client.query("ROLLBACK").catch(() => {}); client.release(); return apiError(res, error, "Unable to prepare shipment");
+    if (!clientReleased) {
+      await client.query("ROLLBACK").catch(() => {});
+      client.release();
+    }
+    return apiError(res, error, "Unable to prepare shipment");
   }
-  client.release();
+  if (!clientReleased) client.release();
 
   try {
     const payload = buildShipwayPayload(order, getTelaquaProductDefaults());

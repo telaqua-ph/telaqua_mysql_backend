@@ -16,18 +16,29 @@ export function buildShipwayPayload(order, product) {
   const total = Number(order.final_total ?? order.total_amount);
   const unitPrice = Number(order.unit_price);
   const { first, last } = splitName(order.customer_name);
-  if (!Number.isFinite(total) || total <= 0 || !text(order.address) || !/^\d{6}$/.test(text(order.pincode))) {
+  const mandatory = {
+    order_id: text(order.order_number || order.id), customer_name: text(order.customer_name),
+    shipping_phone: text(order.phone), shipping_address: text(order.address), shipping_city: text(order.city),
+    shipping_state: text(order.state), shipping_zipcode: text(order.pincode),
+  };
+  if (!mandatory.order_id || !mandatory.customer_name || !mandatory.shipping_phone || !mandatory.shipping_address ||
+      !mandatory.shipping_city || !mandatory.shipping_state || !/^\d{6}$/.test(mandatory.shipping_zipcode) ||
+      !Number.isFinite(total) || total <= 0) {
     const error = new Error("Order is missing valid shipping or pricing details required by Shipway.");
     error.code = "SHIPWAY_ORDER_DATA_INVALID";
     throw error;
   }
-  if (!Number.isFinite(product?.weightGm) || product.weightGm <= 0 || !product?.lengthCm || !product?.widthCm || !product?.heightCm) {
+  const weight = Number(product?.weightGm);
+  const length = Number(product?.lengthCm);
+  const breadth = Number(product?.widthCm);
+  const height = Number(product?.heightCm);
+  if (![weight, length, breadth, height].every((value) => Number.isFinite(value) && value > 0)) {
     const error = new Error("Tel-Aqua product weight and dimensions must be configured before booking with Shipway.");
     error.code = "SHIPWAY_ORDER_DATA_INVALID";
     throw error;
   }
   return {
-    order_id: text(order.order_number || order.id),
+    order_id: mandatory.order_id,
     warehouse_id: config.warehouseId,
     return_warehouse_id: config.returnWarehouseId,
     products: [{
@@ -42,16 +53,16 @@ export function buildShipwayPayload(order, product) {
     order_total: String(total),
     shipping_firstname: first,
     shipping_lastname: last,
-    shipping_address: text(order.address),
-    shipping_city: text(order.city),
-    shipping_state: text(order.state),
+    shipping_address: mandatory.shipping_address,
+    shipping_city: mandatory.shipping_city,
+    shipping_state: mandatory.shipping_state,
     shipping_country: "IN",
-    shipping_phone: text(order.phone),
-    shipping_zipcode: text(order.pincode),
-    order_weight: String(product.weightGm * quantity),
-    box_length: String(product.lengthCm),
-    box_breadth: String(product.widthCm),
-    box_height: String(product.heightCm),
+    shipping_phone: mandatory.shipping_phone,
+    shipping_zipcode: mandatory.shipping_zipcode,
+    order_weight: String(weight * quantity),
+    box_length: String(length),
+    box_breadth: String(breadth),
+    box_height: String(height),
     order_date: new Date(order.created_at || Date.now()).toISOString().slice(0, 19).replace("T", " "),
   };
 }
