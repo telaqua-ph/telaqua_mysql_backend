@@ -16,6 +16,7 @@
     "migrate:inventory": "node scripts/migrate-inventory.js",
     "migrate:order-views": "node scripts/migrate-order-views.js",
     "migrate:delhivery": "node scripts/migrate-delhivery-logistics.js",
+    "migrate:shipway": "node scripts/migrate-shipway-logistics.js",
     "migrate:payment-mode": "node scripts/migrate-payment-mode.js",
     "migrate:admin-web-push": "node scripts/migrate-admin-web-push.js",
     "test": "node --test --test-isolation=none"

@@ -73,6 +73,8 @@ async function attachLatestShipments(orders) {
       return {
         ...order,
         shipment_record_id: shipment.id,
+        shipping_provider: shipment.provider || "Delhivery",
+        carrier_id: shipment.carrier_id || null,
         fulfillment_status: shipment.fulfillment_status || order.fulfillment_status,
         waybill: shipment.waybill_number || order.waybill,
         delhivery_shipment_id: shipment.shipment_id || order.delhivery_shipment_id,

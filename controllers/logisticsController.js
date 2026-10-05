@@ -33,6 +33,8 @@ import {
 import { canFulfillOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
 import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
+import { buildShipwayPayload } from "../services/shipwayPayload.js";
+import { createShipwayShipment } from "../services/shipwayService.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -144,6 +146,15 @@ function apiError(res, error, fallback = "Unable to complete logistics request")
   if (error?.code === "DELHIVERY_UPSTREAM_ERROR") {
     const status = [400, 401, 403, 404, 409, 422, 429].includes(error.status) ? error.status : 502;
     return res.status(status).json({ success: false, message: error.message || fallback });
+  }
+  if (error?.code === "SHIPWAY_CONFIG_ERROR" || error?.code === "SHIPWAY_ORDER_DATA_INVALID") {
+    return res.status(503).json({ success: false, message: error.message });
+  }
+  if (error?.code === "SHIPWAY_OUTCOME_UNKNOWN" || error?.code === "SHIPWAY_PARTIAL_OR_REJECTED") {
+    return res.status(409).json({ success: false, outcome_unknown: true, message: "Shipway booking is not confirmed. Do not retry; verify Shipway Ready to Ship, then contact support to reconcile this order." });
+  }
+  if (error?.code === "SHIPWAY_UPSTREAM_ERROR") {
+    return res.status([400, 401, 403, 409, 422, 429].includes(error.status) ? error.status : 502).json({ success: false, message: error.message || "Shipway rejected the shipment." });
   }
   if (["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"].includes(error?.code)) {
     return res.status(503).json({ success: false, message: "Logistics database migration is required. Run npm run migrate:delhivery." });
@@ -512,14 +523,14 @@ export async function createOrderShipment(req, res) {
     if (!order) { await client.query("ROLLBACK"); return res.status(404).json({ success: false, message: "Order not found." }); }
     if (!canFulfillOrder(order)) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Only paid prepaid orders, or COD orders that are Pending or Paid, can be fulfilled." }); }
     shipment = await shipmentForOrder(orderId, client, true) || await ensureShipment(orderId, client);
-    assertShipmentEnvironment(shipment);
-    if (shipment.shipment_created_at || shipment.shipment_id) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "Shipment already exists for this order.", shipment }); }
-    if (shipment.serviceable === 0) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Shipment cannot be created because the destination pincode is not serviceable." }); }
-    if (!shipment.waybill_number) { await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Generate a waybill before creating the shipment." }); }
-    if (shipment.processing_token && shipment.processing_started_at && Date.now() - new Date(shipment.processing_started_at).getTime() < 10 * 60 * 1000) {
+    // A legacy order-level AWB or a Delhivery shipment must never be moved to Shipway.
+    const active = order.waybill || order.delhivery_shipment_id || order.shipment_created_at ||
+      shipment.waybill_number || shipment.shipment_id || shipment.shipment_created_at;
+    if (active) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "An active shipment or AWB already exists for this order. It was not sent to Shipway.", shipment }); }
+    if (shipment.processing_token) {
       await client.query("ROLLBACK"); return res.status(409).json({ success: false, message: "Shipment creation is already in progress." });
     }
-    await client.query("UPDATE shipments SET processing_token=?, processing_started_at=NOW(), last_error=NULL WHERE id=?", [token, shipment.id]);
+    await client.query("UPDATE shipments SET provider='Shipway', courier_name='Shipway', processing_token=?, processing_started_at=NOW(), last_error=NULL WHERE id=?", [token, shipment.id]);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {}); client.release(); return apiError(res, error, "Unable to prepare shipment");
@@ -527,32 +538,23 @@ export async function createOrderShipment(req, res) {
   client.release();
 
   try {
-    if (!isLiveFulfillmentEnabled()) {
-      await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]);
-      return res.status(200).json({
-        success: true,
-        pending: true,
-        message: LIVE_FULFILLMENT_PAUSED_MESSAGE,
-        shipment_id: shipment.id,
-      });
-    }
-
-    const payload = buildShipmentPayload(order, shipment, getTelaquaWarehouse(), getTelaquaProductDefaults());
-    const data = await createShipment(payload);
-    assertDelhiveryAccepted(data, "shipment_create");
-    const identity = shipmentIdentity(data);
-    const waybill = identity.waybill || shipment.waybill_number;
-    if (!waybill) throw Object.assign(new Error("Delhivery accepted the request but returned no AWB."), { code: "DELHIVERY_INVALID_RESPONSE" });
+    const payload = buildShipwayPayload(order, getTelaquaProductDefaults());
+    const { body: data, booking } = await createShipwayShipment(payload);
     await query(
-      `UPDATE shipments SET shipment_id=?, waybill_number=?, fulfillment_status='shipment_created', shipment_status=?,
-       shipment_created_at=NOW(), shipment_response=?, processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
-      [identity.shipmentId, waybill, identity.status, asJson(data), shipment.id, token]
+      `UPDATE shipments SET provider='Shipway', carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
+       shipment_created_at=NOW(), shipping_label_url=?, label_status='Generated', label_generated_at=NOW(), shipment_response=?, label_response=?,
+       processing_token=NULL, processing_started_at=NULL, last_error=NULL WHERE id=? AND processing_token=?`,
+      [booking.carrierId, booking.awb, booking.labelUrl, asJson(data), asJson(data.awb_response), shipment.id, token]
     );
-    await query("UPDATE orders SET fulfillment_status='shipment_created' WHERE id=?", [orderId]);
-    await writeAudit(shipment.id, adminId(req), "shipment_created", null, { waybill, shipmentId: identity.shipmentId });
-    return res.status(201).json({ success: true, message: "Shipment created successfully.", shipment_id: shipment.id, waybill, data });
+    await query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [orderId]);
+    await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, labelUrl: booking.labelUrl });
+    return res.status(201).json({ success: true, message: "Shipment is Ready to Ship.", shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, data });
   } catch (error) {
-    await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
+    // A timeout or partial Shipway response can have booked an order upstream. Keep the
+    // lock intact until a human verifies Ready to Ship, rather than risking a duplicate.
+    if (!['SHIPWAY_OUTCOME_UNKNOWN', 'SHIPWAY_PARTIAL_OR_REJECTED'].includes(error?.code)) {
+      await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
+    }
     await recordShipmentError(shipment.id, error);
     return apiError(res, error, "Shipment creation failed");
   }
