@@ -71,7 +71,7 @@ export async function createShipwayShipment(payload) {
     const orderNumber = payload.order_id;
     console.info('Shipway booking payload check', {
       orderNumber,
-      hasCarrierId: Object.prototype.hasOwnProperty.call(payload, 'carrier_id'),
+      hasCarrierId: Object.hasOwn(payload, 'carrier_id'),
       carrierId: payload.carrier_id ?? null,
       payloadKeys: Object.keys(payload),
     });
