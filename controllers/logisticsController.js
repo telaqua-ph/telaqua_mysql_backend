@@ -34,7 +34,7 @@ import { canFulfillOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
 import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { createShipwayShipment, findShipwayOrder } from "../services/shipwayService.js";
+import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection } from "../services/shipwayService.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -590,9 +590,17 @@ export async function createOrderShipment(req, res) {
     await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl });
     return res.status(201).json({ success: true, message: "Shipment is Ready to Ship.", shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, data });
   } catch (error) {
-    // A timeout or partial Shipway response can have booked an order upstream. Keep the
-    // lock intact until a human verifies Ready to Ship, rather than risking a duplicate.
-    if (!['SHIPWAY_OUTCOME_UNKNOWN', 'SHIPWAY_PARTIAL_OR_REJECTED'].includes(error?.code)) {
+    // Explicit Shipway rejection without an AWB/label is safe to retry. Timeouts and
+    // ambiguous partial responses remain locked for read-only reconciliation.
+    if (isDefinitiveShipwayBookingRejection(error)) {
+      await query(
+        `UPDATE shipments SET provider='Shipway', courier_name='Shipway', carrier_id=NULL, waybill_number=NULL,
+         fulfillment_status='unfulfilled', shipment_status='Booking Failed', shipment_created_at=NULL,
+         shipping_label_url=NULL, label_status='Failed', label_generated_at=NULL,
+         processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?`,
+        [shipment.id, token]
+      ).catch(() => {});
+    } else if (!['SHIPWAY_OUTCOME_UNKNOWN', 'SHIPWAY_PARTIAL_OR_REJECTED'].includes(error?.code)) {
       await query("UPDATE shipments SET processing_token=NULL, processing_started_at=NULL WHERE id=? AND processing_token=?", [shipment.id, token]).catch(() => {});
     }
     await recordShipmentError(shipment.id, error);

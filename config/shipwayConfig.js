@@ -31,6 +31,11 @@ function optionalCarrierId() {
     error.code = "SHIPWAY_CONFIG_ERROR";
     throw error;
   }
+  if (raw === "109177") {
+    const error = new Error("SHIPWAY_CARRIER_ID must not be the Shipway warehouse ID (109177). Remove it to enable Shipway auto-assignment.");
+    error.code = "SHIPWAY_CONFIG_ERROR";
+    throw error;
+  }
   return raw;
 }
 

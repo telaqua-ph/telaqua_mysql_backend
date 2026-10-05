@@ -38,6 +38,7 @@ import {
 } from "../lib/orderAttribution.js";
 import { pool } from "../config/db.js";
 import crypto from "node:crypto";
+import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSafety.js";
 
 const ALLOWED_ORDER_STATUSES = [
   "New",
@@ -1695,6 +1696,7 @@ export async function updateOrder(req, res) {
 
 /** DELETE /api/orders/:id — restored */
 export async function deleteOrder(req, res) {
+  let client;
   try {
     const id = parseOrderId(req.params.id);
     if (id === null) {
@@ -1704,28 +1706,43 @@ export async function deleteOrder(req, res) {
       });
     }
 
-    const { rowCount } = await query(
-      `DELETE FROM orders
-       WHERE id = ?`,
-      [id]
-    );
-
-    if (!rowCount) {
-      return res.status(404).json({
+    client = await pool.connect();
+    await client.query("BEGIN");
+    const found = await client.query("SELECT id FROM orders WHERE id=? FOR UPDATE", [id]);
+    if (!found.rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+    const shipmentResult = await client.query("SELECT * FROM shipments WHERE order_id=? FOR UPDATE", [id]);
+    const shipments = shipmentResult.rows;
+    const protectedShipment = shipments.find((shipment) => !isSafeFailedShipmentPlaceholder(shipment));
+    if (protectedShipment) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
         success: false,
-        message: "Order not found",
+        message: "This order has a real shipment record and cannot be deleted. Existing Delhivery and AWB shipments are preserved.",
       });
     }
+    // Child rows are deliberately removed first. This only applies to unbooked,
+    // non-Delhivery placeholders; child tracking/audit rows cascade from shipments.
+    if (shipments.length) await client.query("DELETE FROM shipments WHERE order_id=?", [id]);
+    const deleted = await client.query("DELETE FROM orders WHERE id=?", [id]);
+    await client.query("COMMIT");
+
+    if (!deleted.rowCount) return res.status(404).json({ success: false, message: "Order not found" });
 
     return res.status(200).json({
       success: true,
       message: "Order deleted successfully",
     });
   } catch (error) {
+    await client?.query("ROLLBACK").catch(() => {});
     console.error("Order by id API error:", error);
     return res.status(500).json({
       success: false,
       message: "Internal server error",
     });
+  } finally {
+    client?.release();
   }
 }

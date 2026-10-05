@@ -101,14 +101,14 @@ export function isPromoWithinUsageLimit(row) {
 }
 
 /** Retired public offer codes — never suggest these on landing. */
-const RETIRED_OFFER_CODES = ["WELCOME25", "SAVE500"];
+const RETIRED_OFFER_CODES = ["WELCOME25", "SAVE500", "SN40"];
 
 /** Preferred Website / Direct public coupon (matches promo_codes.code). */
-const PREFERRED_WEBSITE_DIRECT_CODE = "SN40";
+const PREFERRED_WEBSITE_DIRECT_CODE = "TA40";
 
 /**
  * Suggested offer for marketing attribution (platform + language).
- * Prefers SN40 for Website + Direct; skips retired WELCOME25 / SAVE500.
+ * Prefers TA40 for Website + Direct; never auto-selects retired offer codes.
  */
 export async function findOfferByPlatformLanguage(platform, language) {
   const retiredPlaceholders = RETIRED_OFFER_CODES.map(() => "?").join(", ");

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { assertShipwayBookingSucceeded, createShipwayShipment, findShipwayOrder } from "../services/shipwayService.js";
+import { assertShipwayBookingSucceeded, createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection } from "../services/shipwayService.js";
+import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSafety.js";
 
 const env = process.env;
 env.SHIPWAY_EMAIL = "merchant@example.test";
@@ -43,6 +44,17 @@ test("Shipway carrier_id is omitted unless a verified numeric value is configure
   delete env.SHIPWAY_CARRIER_ID;
 });
 
+test("invalid carrier configuration rejects before any Shipway API request", async () => {
+  const prior = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => { requests += 1; throw new Error("must not call Shipway"); };
+  env.SHIPWAY_CARRIER_ID = "not-a-number";
+  await assert.rejects(() => createShipwayShipment({ order_id: "TAQ-000873" }), { code: "SHIPWAY_CONFIG_ERROR" });
+  assert.equal(requests, 0);
+  delete env.SHIPWAY_CARRIER_ID;
+  globalThis.fetch = prior;
+});
+
 test("Shipway success requires both booking and label-generation responses", () => {
   const booking = assertShipwayBookingSucceeded({ success: true, awb_response: { success: true, AWB: "SW123", carrier_id: "3411", shipping_url: "https://labels.example/SW123.pdf" } });
   assert.deepEqual(booking, { awb: "SW123", carrierId: "3411", carrierName: null, labelUrl: "https://labels.example/SW123.pdf" });
@@ -54,6 +66,22 @@ test("Shipway rejected booking retains its safe upstream error", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ message: "Invalid pincode" }), { status: 422 });
   await assert.rejects(() => createShipwayShipment({ order_id: "TAQ-000873" }), { code: "SHIPWAY_UPSTREAM_ERROR", message: /Invalid pincode/ });
   globalThis.fetch = prior;
+});
+
+test("explicit no-courier rejection has no shipment artifacts and is safe to unlock", () => {
+  let rejected;
+  try {
+    assertShipwayBookingSucceeded({ success: false, message: "carrier_id does not exist.", awb_response: "No Courier Found." });
+  } catch (error) { rejected = error; }
+  assert.equal(isDefinitiveShipwayBookingRejection(rejected), true);
+  assert.equal(rejected.upstreamBody.awb_response, "No Courier Found.");
+});
+
+test("only a failed unbooked non-Delhivery placeholder can be cleaned up", () => {
+  assert.equal(isSafeFailedShipmentPlaceholder({ provider: "Shipway", courier_name: "Shipway", fulfillment_status: "unfulfilled" }), true);
+  assert.equal(isSafeFailedShipmentPlaceholder({ provider: "Shipway", waybill_number: "SW123" }), false);
+  assert.equal(isSafeFailedShipmentPlaceholder({ provider: "Delhivery", fulfillment_status: "unfulfilled" }), false);
+  assert.equal(isSafeFailedShipmentPlaceholder({ provider: null, courier_name: "Delhivery" }), false);
 });
 
 test("Shipway lookup finds an existing AWB and label without booking again", async () => {
