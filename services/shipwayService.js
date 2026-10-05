@@ -32,20 +32,6 @@ export function shipwayDiagnostics({ orderNumber, httpStatus = null, body = null
   return details;
 }
 
-function shipwayRequestDiagnostics(payload, config) {
-  console.info("Shipway request diagnostics", {
-    operation: "booking_request",
-    order_number: payload.order_id,
-    payload_fields: Object.keys(payload).sort(),
-    carrier_id_included: Object.hasOwn(payload, "carrier_id"),
-    config: {
-      warehouse_id_valid: config.warehouseId === "109177",
-      return_warehouse_id_valid: config.returnWarehouseId === "109177",
-      carrier_id_configured: Boolean(config.carrierId),
-    },
-  });
-}
-
 export function assertShipwayBookingSucceeded(body, context = {}) {
   const awb = String(body?.awb_response?.AWB || "").trim();
   const labelUrl = String(body?.awb_response?.shipping_url || "").trim();
@@ -70,17 +56,25 @@ export function isDefinitiveShipwayBookingRejection(error) {
   const body = error?.upstreamBody;
   const awb = valueOf(body, ["AWB", "awb", "awb_number", "tracking_number"]);
   const labelUrl = valueOf(body, ["shipping_url", "label_url", "shipping_label_url"]);
-  return error?.code === "SHIPWAY_PARTIAL_OR_REJECTED" && body?.success === false && !awb && !labelUrl;
+  // A response without either booking artifact cannot put a parcel in transit.
+  // It is safe to release its lock so the corrected booking can be retried.
+  return error?.code === "SHIPWAY_PARTIAL_OR_REJECTED" && !awb && !labelUrl;
 }
 
 /** Exactly one booking request: retries after an uncertain outcome can duplicate a courier order. */
 export async function createShipwayShipment(payload) {
   const config = getShipwayConfig();
-  shipwayRequestDiagnostics(payload, config);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
     const authorization = Buffer.from(`${config.email}:${config.licenseKey}`, "utf8").toString("base64");
+    const orderNumber = payload.order_id;
+    console.info('Shipway booking payload check', {
+      orderNumber,
+      hasCarrierId: Object.prototype.hasOwnProperty.call(payload, 'carrier_id'),
+      carrierId: payload.carrier_id ?? null,
+      payloadKeys: Object.keys(payload),
+    });
     const response = await fetch(ENDPOINT, {
       method: "POST",
       headers: { Authorization: `Basic ${authorization}`, "Content-Type": "application/json" },

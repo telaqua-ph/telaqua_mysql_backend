@@ -37,11 +37,10 @@ export function buildShipwayPayload(order, product) {
     error.code = "SHIPWAY_ORDER_DATA_INVALID";
     throw error;
   }
-  return {
+  const payload = {
     order_id: mandatory.order_id,
     warehouse_id: config.warehouseId,
     return_warehouse_id: config.returnWarehouseId,
-    ...(config.carrierId ? { carrier_id: config.carrierId } : {}),
     products: [{
       product: text(product.name) || "Tel-Aqua Product",
       product_code: text(process.env.TELAQUA_PRODUCT_SKU) || DEFAULT_PRODUCT_SKU,
@@ -66,4 +65,10 @@ export function buildShipwayPayload(order, product) {
     box_height: String(height),
     order_date: new Date(order.created_at || Date.now()).toISOString().slice(0, 19).replace("T", " "),
   };
+  // Carrier selection is optional. Do not ever repurpose a warehouse ID as a courier ID.
+  const rawCarrierId = String(process.env.SHIPWAY_CARRIER_ID || '').trim();
+  if (/^\d+$/.test(rawCarrierId) && rawCarrierId !== "0" && rawCarrierId !== config.warehouseId) {
+    payload.carrier_id = rawCarrierId;
+  }
+  return payload;
 }

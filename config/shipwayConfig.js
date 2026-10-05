@@ -23,22 +23,6 @@ const credential = (name) => {
   return value;
 };
 
-function optionalCarrierId() {
-  const raw = String(process.env.SHIPWAY_CARRIER_ID ?? "").trim();
-  if (!raw || /^(null|undefined)$/i.test(raw)) return null;
-  if (!/^\d+$/.test(raw) || Number(raw) <= 0) {
-    const error = new Error("SHIPWAY_CARRIER_ID must be a positive numeric Shipway carrier ID, or be omitted for Shipway auto-assignment");
-    error.code = "SHIPWAY_CONFIG_ERROR";
-    throw error;
-  }
-  if (raw === "109177") {
-    const error = new Error("SHIPWAY_CARRIER_ID must not be the Shipway warehouse ID (109177). Remove it to enable Shipway auto-assignment.");
-    error.code = "SHIPWAY_CONFIG_ERROR";
-    throw error;
-  }
-  return raw;
-}
-
 /** Server-only Shipway configuration. Never return or log these credentials. */
 export function getShipwayConfig() {
   return {
@@ -46,6 +30,5 @@ export function getShipwayConfig() {
     licenseKey: credential("SHIPWAY_LICENSE_KEY"),
     warehouseId: positiveId("SHIPWAY_WAREHOUSE_ID"),
     returnWarehouseId: positiveId("SHIPWAY_RETURN_WAREHOUSE_ID"),
-    carrierId: optionalCarrierId(),
   };
 }

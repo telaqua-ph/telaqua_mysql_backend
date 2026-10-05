@@ -150,6 +150,9 @@ function apiError(res, error, fallback = "Unable to complete logistics request")
   if (error?.code === "SHIPWAY_CONFIG_ERROR" || error?.code === "SHIPWAY_ORDER_DATA_INVALID") {
     return res.status(503).json({ success: false, message: error.message });
   }
+  if (isDefinitiveShipwayBookingRejection(error)) {
+    return res.status(422).json({ success: false, retryable: true, message: error.message || "Shipway rejected the shipment." });
+  }
   if (error?.code === "SHIPWAY_OUTCOME_UNKNOWN" || error?.code === "SHIPWAY_PARTIAL_OR_REJECTED") {
     return res.status(409).json({ success: false, outcome_unknown: true, message: error.message || "Shipway booking is not confirmed. Do not retry; verify Shipway Ready to Ship, then contact support to reconcile this order." });
   }

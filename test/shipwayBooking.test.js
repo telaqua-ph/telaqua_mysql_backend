@@ -40,17 +40,26 @@ test("Shipway carrier_id is omitted unless a verified numeric value is configure
   env.SHIPWAY_CARRIER_ID = "undefined";
   assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
   env.SHIPWAY_CARRIER_ID = "Shipway-Delhivery";
-  assert.throws(() => buildShipwayPayload(order, product), { code: "SHIPWAY_CONFIG_ERROR" });
+  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
+  env.SHIPWAY_CARRIER_ID = "0";
+  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
+  env.SHIPWAY_CARRIER_ID = "109177";
+  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
   delete env.SHIPWAY_CARRIER_ID;
 });
 
-test("invalid carrier configuration rejects before any Shipway API request", async () => {
+test("invalid carrier configuration is omitted and does not prevent Shipway auto-assignment", async () => {
   const prior = globalThis.fetch;
   let requests = 0;
-  globalThis.fetch = async () => { requests += 1; throw new Error("must not call Shipway"); };
+  globalThis.fetch = async (_url, request) => {
+    requests += 1;
+    assert.equal(Object.hasOwn(JSON.parse(request.body), "carrier_id"), false);
+    return new Response(JSON.stringify({ success: false, message: "No Courier Found." }), { status: 200 });
+  };
   env.SHIPWAY_CARRIER_ID = "not-a-number";
-  await assert.rejects(() => createShipwayShipment({ order_id: "TAQ-000873" }), { code: "SHIPWAY_CONFIG_ERROR" });
-  assert.equal(requests, 0);
+  const payload = buildShipwayPayload(order, product);
+  await assert.rejects(() => createShipwayShipment(payload), { code: "SHIPWAY_PARTIAL_OR_REJECTED" });
+  assert.equal(requests, 1);
   delete env.SHIPWAY_CARRIER_ID;
   globalThis.fetch = prior;
 });
@@ -75,6 +84,14 @@ test("explicit no-courier rejection has no shipment artifacts and is safe to unl
   } catch (error) { rejected = error; }
   assert.equal(isDefinitiveShipwayBookingRejection(rejected), true);
   assert.equal(rejected.upstreamBody.awb_response, "No Courier Found.");
+});
+
+test("a rejected response without an AWB or label is safe to unlock even if success is omitted", () => {
+  let rejected;
+  try {
+    assertShipwayBookingSucceeded({ message: "No Courier Found." });
+  } catch (error) { rejected = error; }
+  assert.equal(isDefinitiveShipwayBookingRejection(rejected), true);
 });
 
 test("only a failed unbooked non-Delhivery placeholder can be cleaned up", () => {
