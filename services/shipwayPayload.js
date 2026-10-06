@@ -9,19 +9,6 @@ const splitName = (name) => {
   return { first: parts.shift() || "Customer", last: parts.join(" ") || "." };
 };
 
-/**
- * Carrier selection is optional: without carrier_id Shipway auto-assigns using the
- * account's courier priority rules. Never repurpose a warehouse ID as a courier ID.
- */
-export function configuredCarrierId(config) {
-  const raw = String(process.env.SHIPWAY_CARRIER_ID ?? "").trim();
-  if (!/^\d+$/.test(raw)) return null;
-  const id = Number(raw);
-  if (!Number.isSafeInteger(id) || id <= 0) return null;
-  if (id === Number(config.warehouseId) || id === Number(config.returnWarehouseId)) return null;
-  return id;
-}
-
 /** Build Shipway v2orders payload solely from stored order data and product defaults. */
 export function buildShipwayPayload(order, product) {
   const config = getShipwayConfig();
@@ -79,7 +66,7 @@ export function buildShipwayPayload(order, product) {
   };
   const email = text(order.email);
   if (email) payload.email = email;
-  const carrierId = configuredCarrierId(config);
-  if (carrierId !== null) payload.carrier_id = carrierId;
+  // Deliberately omit carrier_id. Shipway selects the serviceable courier from
+  // the dashboard's Courier Priority / Auto Assignment configuration.
   return payload;
 }

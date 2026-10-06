@@ -176,14 +176,12 @@ const assertNoSecrets = (logs) => {
 
 /* ---------- Payload ---------- */
 
-test("SHIPWAY_CARRIER_ID that is not a positive non-warehouse integer omits carrier_id entirely", () => {
-  for (const value of [undefined, "", "   ", "null", "undefined", "0", "-5", "12.5", "109177", "Shipway-Delhivery", "3411abc", "99999999999999999999"]) {
+test("Shipway Auto Assignment omits carrier_id for every legacy SHIPWAY_CARRIER_ID value", () => {
+  for (const value of [undefined, "", "   ", "null", "undefined", "0", "-5", "12.5", "109177", "Shipway-Delhivery", "3411abc", "3411", "99999999999999999999"]) {
     if (value === undefined) delete env.SHIPWAY_CARRIER_ID; else env.SHIPWAY_CARRIER_ID = value;
     const payload = buildShipwayPayload(baseOrder, product);
     assert.equal(Object.hasOwn(payload, "carrier_id"), false, `carrier_id must be omitted for ${JSON.stringify(value)}`);
   }
-  env.SHIPWAY_CARRIER_ID = " 3411 ";
-  assert.strictEqual(buildShipwayPayload(baseOrder, product).carrier_id, 3411);
   delete env.SHIPWAY_CARRIER_ID;
 });
 
@@ -246,7 +244,6 @@ test("'No order found' with an AWB present is not treated as absent", async () =
 /* ---------- Create shipment flow ---------- */
 
 test("successful booking saves provider, carrier, AWB, label and Ready to Ship; a second click does not rebook", async () => {
-  delete env.SHIPWAY_CARRIER_ID;
   const db = createFakeDb({ orders: [baseOrder] });
   await withHarness({ db, responses: [v2orders(BOOKED)] }, async ({ calls, logs }) => {
     const first = await call(createOrderShipment, { params: { orderId: "873" } });
@@ -270,8 +267,8 @@ test("successful booking saves provider, carrier, AWB, label and Ready to Ship; 
     assert.equal(calls.length, 1, "the second click must not call Shipway");
 
     const verification = logs.find(([label]) => label === "[Shipway] outgoing booking verification");
-    assert.deepEqual(verification[1].hasCarrierId, false);
-    assert.equal(verification[1].carrierId, null);
+    assert.equal(verification[1].autoAssignment, true);
+    assert.equal(verification[1].payloadKeys.includes("carrier_id"), false);
     assert.equal(verification[1].orderNumber, "TAQ-000873");
     assertNoSecrets(logs);
   });

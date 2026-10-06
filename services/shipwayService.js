@@ -92,8 +92,7 @@ export async function createShipwayShipment(payload) {
     const orderNumber = payload.order_id;
     console.info('[Shipway] outgoing booking verification', {
       orderNumber,
-      hasCarrierId: Object.hasOwn(payload, 'carrier_id'),
-      carrierId: payload.carrier_id ?? null,
+      autoAssignment: true,
       payloadKeys: Object.keys(payload),
     });
     const response = await fetch(ENDPOINT, {

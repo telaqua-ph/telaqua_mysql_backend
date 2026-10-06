@@ -19,7 +19,6 @@ const order = {
 };
 
 test("Shipway payload uses stored order values and configured Shipway warehouses", () => {
-  delete env.SHIPWAY_CARRIER_ID;
   const payload = buildShipwayPayload(order, product);
   assert.equal(payload.order_id, "TAQ-000042");
   assert.equal(payload.warehouse_id, "109177");
@@ -32,23 +31,13 @@ test("Shipway payload uses stored order values and configured Shipway warehouses
   assert.equal(Object.hasOwn(payload, "carrier_id"), false);
 });
 
-test("Shipway carrier_id is omitted unless a verified numeric value is configured", () => {
+test("Shipway Auto Assignment always omits carrier_id, including when a legacy variable is set", () => {
   env.SHIPWAY_CARRIER_ID = "3411";
-  assert.strictEqual(buildShipwayPayload(order, product).carrier_id, 3411);
-  env.SHIPWAY_CARRIER_ID = "   ";
-  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
-  env.SHIPWAY_CARRIER_ID = "undefined";
-  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
-  env.SHIPWAY_CARRIER_ID = "Shipway-Delhivery";
-  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
-  env.SHIPWAY_CARRIER_ID = "0";
-  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
-  env.SHIPWAY_CARRIER_ID = "109177";
   assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
   delete env.SHIPWAY_CARRIER_ID;
 });
 
-test("invalid carrier configuration is omitted and does not prevent Shipway auto-assignment", async () => {
+test("Shipway Auto Assignment POST payload does not contain carrier_id", async () => {
   const prior = globalThis.fetch;
   let requests = 0;
   globalThis.fetch = async (_url, request) => {
@@ -56,7 +45,7 @@ test("invalid carrier configuration is omitted and does not prevent Shipway auto
     assert.equal(Object.hasOwn(JSON.parse(request.body), "carrier_id"), false);
     return new Response(JSON.stringify({ success: false, message: "No Courier Found." }), { status: 200 });
   };
-  env.SHIPWAY_CARRIER_ID = "not-a-number";
+  env.SHIPWAY_CARRIER_ID = "3411";
   const payload = buildShipwayPayload(order, product);
   await assert.rejects(() => createShipwayShipment(payload), { code: "SHIPWAY_PARTIAL_OR_REJECTED" });
   assert.equal(requests, 1);
