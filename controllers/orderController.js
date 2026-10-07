@@ -227,6 +227,12 @@ function matchesExportMetric(order, metric) {
   if (metric === "new") return ["new", "pending"].includes(status);
   if (metric === "sales_devices") return confirmed && !rto && payment === "paid";
   if (metric === "sales_cod_pending_devices") return confirmed && !rto && mode === "cod" && payment !== "paid";
+  if (metric === "sales_total_devices") {
+    return confirmed && !rto && (
+      payment === "paid" ||
+      (mode === "cod" && payment !== "paid")
+    );
+  }
   if (metric === "sales_revenue_received") return payment === "paid" && !cancelled;
   if (metric === "sales_pending_revenue") return confirmed && mode === "cod" && payment === "pending";
   if (metric === "shipments_created") return exportShipmentLabel(order) === "Shipment Created";
