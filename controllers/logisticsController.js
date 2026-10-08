@@ -34,7 +34,7 @@ import { canFulfillOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
 import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection, isHttpUrl } from "../services/shipwayService.js";
+import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection, isHttpUrl, resolveShipwayCarrier } from "../services/shipwayService.js";
 import { DELHIVERY_ONLY_SQL, assertDelhiveryManagedShipment, isShipwayShipment } from "../services/shipmentProvider.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
@@ -154,6 +154,8 @@ function apiError(res, error, fallback = "Unable to complete logistics request")
   if (error?.code === "SHIPWAY_CONFIG_ERROR" || error?.code === "SHIPWAY_ORDER_DATA_INVALID") {
     return res.status(503).json({ success: false, message: error.message });
   }
+  if (error?.code === "SHIPWAY_NO_CARRIER") return res.status(422).json({ success: false, retryable: true, message: error.message });
+  if (error?.code === "SHIPWAY_CARRIER_LOOKUP_FAILED") return res.status(502).json({ success: false, retryable: true, message: error.message });
   if (isDefinitiveShipwayBookingRejection(error)) {
     return res.status(422).json({ success: false, retryable: true, message: error.message || "Shipway rejected the shipment." });
   }
@@ -666,8 +668,11 @@ export async function createOrderShipment(req, res) {
   }
 
   try {
-    const payload = buildShipwayPayload(order, getTelaquaProductDefaults());
+    const carrier = await resolveShipwayCarrier();
+    const payload = buildShipwayPayload(order, getTelaquaProductDefaults(), { carrierId: carrier.carrierId });
     const { body: data, booking } = await createShipwayShipment(payload);
+    booking.carrierId = booking.carrierId || carrier.carrierId;
+    booking.carrierName = booking.carrierName || carrier.carrierName;
     await pool.query(
       `UPDATE shipments SET provider='Shipway', courier_name=?, carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
        shipment_created_at=NOW(), shipping_label_url=?, label_status='Generated', label_generated_at=NOW(), shipment_response=?, label_response=?,
