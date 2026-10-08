@@ -32,6 +32,7 @@ function parseRange(req) {
 function mapStatsRow(row, from, to) {
   return {
     totalOrders: Number(row.total_orders || 0),
+    razorpayFailedPendingOrders: Number(row.razorpay_failed_pending_orders || 0),
     newOrders: Number(row.new_orders || 0),
     paidOrders: Number(row.paid_orders || 0),
     pendingPayments: Number(row.pending_payments || 0),
@@ -328,6 +329,9 @@ async function fetchDashboardStats({ adminId, from, to }) {
     ))`;
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const codExpr = codOrderPredicate(columns);
+  // normalizePaymentMode defaults non-COD orders to Razorpay, so this is the
+  // SQL equivalent of the frontend's !isCodOrder(order) check.
+  const razorpayExpr = `NOT (${codExpr})`;
   const confirmedOrderExpr = confirmedOrderPredicate(columns);
   const deviceConfirmedExpr = deviceConfirmationPredicate(columns);
   const cancelledExpr = cancellationPredicate(
@@ -371,7 +375,9 @@ async function fetchDashboardStats({ adminId, from, to }) {
      /* Full-table operations counts (no date filter, no LIMIT). Paid = payment_status Paid only. */
      operational AS (
        SELECT
-         CAST(COUNT(*) AS SIGNED) AS total_orders,
+         /* Total Orders excludes only Razorpay orders whose payment is still Pending or Failed. */
+         CAST(SUM(CASE WHEN NOT (${razorpayExpr} AND LOWER(TRIM(${paymentStatusExpr})) IN ('failed', 'pending')) THEN 1 ELSE 0 END) AS SIGNED) AS total_orders,
+         CAST(SUM(CASE WHEN ${razorpayExpr} AND LOWER(TRIM(${paymentStatusExpr})) IN ('failed', 'pending') THEN 1 ELSE 0 END) AS SIGNED) AS razorpay_failed_pending_orders,
          CAST(SUM(CASE WHEN LOWER(${orderStatusExpr}) IN ('new', 'pending') THEN 1 ELSE 0 END) AS SIGNED) AS new_orders,
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Paid' THEN 1 ELSE 0 END) AS SIGNED) AS paid_orders,
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Pending' THEN 1 ELSE 0 END) AS SIGNED) AS pending_payments,
@@ -559,6 +565,7 @@ export async function getStats(req, res) {
       return res.status(200).json({
         success: true,
         totalOrders: 0,
+        razorpayFailedPendingOrders: 0,
         newOrders: 0,
         paidOrders: 0,
         pendingPayments: 0,

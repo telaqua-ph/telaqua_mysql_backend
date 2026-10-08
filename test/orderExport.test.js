@@ -37,6 +37,16 @@ test("all time is the only mode that exports all rows", () => {
   assert.equal(filterOrdersForExport(orders, { startDate: "2026-10-01", endDate: "2026-10-03", selectedOrderIds: [] }).length, 2);
 });
 
+test("Razorpay failed and pending export metric excludes COD and paid Razorpay orders", () => {
+  const result = filterOrdersForExport([
+    { id: 1, created_at: "2026-10-01", payment_mode: "razorpay", payment_status: "Paid" },
+    { id: 2, created_at: "2026-10-01", payment_mode: "razorpay", payment_status: "Pending" },
+    { id: 3, created_at: "2026-10-01", payment_mode: "razorpay", payment_status: "failed" },
+    { id: 4, created_at: "2026-10-01", payment_mode: "cod", payment_status: "Pending" },
+  ], { metricFilter: "razorpay_failed_pending", selectedOrderIds: [] });
+  assert.deepEqual(result.map((order) => order.id), [2, 3]);
+});
+
 test("total devices sold list includes paid devices and confirmed COD payment-pending orders", () => {
   const result = filterOrdersForExport(orders, {
     metricFilter: "sales_total_devices",
