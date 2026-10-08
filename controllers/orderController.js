@@ -223,6 +223,11 @@ function matchesExportMetric(order, metric) {
   const status = exportText(order.order_status || order.status).toLowerCase();
   const payment = exportText(order.payment_status).toLowerCase();
   const mode = exportText(order.payment_mode).toLowerCase();
+  const method = exportText(order.payment_method).toLowerCase();
+  const isCod = mode === "cod" || (
+    mode !== "razorpay" && ["cod", "cash on delivery", "cash_on_delivery"].includes(method)
+  );
+  const razorpayFailedOrPending = !isCod && ["failed", "pending"].includes(payment);
   const cancelled = Number(order.is_cancelled) === 1 || status === "cancelled";
   const rto = ["rto", "returned"].includes(exportText(order.fulfillment_status).toLowerCase());
   const confirmed = deriveOrderConfirmationStatus(order) === "Confirmed" && !cancelled;
@@ -238,6 +243,7 @@ function matchesExportMetric(order, metric) {
   if (metric === "sales_revenue_received") return payment === "paid" && !cancelled;
   if (metric === "sales_pending_revenue") return confirmed && mode === "cod" && payment === "pending";
   if (metric === "shipments_created") return exportShipmentLabel(order) === "Shipment Created";
+  if (metric === "razorpay_failed_pending") return razorpayFailedOrPending;
   return true;
 }
 
