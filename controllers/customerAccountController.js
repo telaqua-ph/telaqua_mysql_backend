@@ -22,6 +22,7 @@ import {
 } from "../services/inventoryService.js";
 import { normalizePaymentMode, isCodOrder } from "../services/paymentMode.js";
 import { isCustomerCodCancellable, evaluateCustomerCodCancel } from "../services/customerCodCancel.js";
+import { resolveOrderEmail } from "../utils/guestEmail.js";
 
 const OTP_EXPIRY_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
@@ -97,6 +98,8 @@ function safeOrder(order, req, detailed = false, shipment = null) {
     ["generated", "fallback_generated"].includes(String(merged.invoice_status || "").toLowerCase());
   const result = {
     id: merged.id,
+    phone: merged.phone || null,
+    email: resolveOrderEmail(merged.email, merged.phone),
     order_number: merged.order_number,
     created_at: merged.created_at,
     updated_at: merged.updated_at,
@@ -538,7 +541,7 @@ async function loadProfile(phone) {
   return {
     phone,
     name: rows[0]?.customer_name || null,
-    email: rows[0]?.email || null,
+    email: resolveOrderEmail(rows[0]?.email, phone),
   };
 }
 

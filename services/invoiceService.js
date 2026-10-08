@@ -5,6 +5,7 @@
 
 import crypto from "node:crypto";
 import { query } from "../config/db.js";
+import { resolveOrderEmail } from "../utils/guestEmail.js";
 import { normalizeIndianPhone } from "../utils/phoneUtils.js";
 import { isCodOrder } from "./paymentMode.js";
 import { generateLocalInvoicePdf } from "./localInvoicePdfService.js";
@@ -100,7 +101,7 @@ function buildParty(order) {
     id: `TAQ-ORDER-${order.id}`,
     type: "customer",
     name: String(order.customer_name || `Order ${order.id}`),
-    email: order.email || undefined,
+    email: resolveOrderEmail(order.email, order.phone) || undefined,
   };
   if (!order.is_test_order) {
     party.billing_address = buildAddress(order);

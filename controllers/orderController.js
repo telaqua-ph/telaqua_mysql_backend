@@ -39,6 +39,7 @@ import {
 import { pool } from "../config/db.js";
 import crypto from "node:crypto";
 import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSafety.js";
+import { resolveOrderEmail } from "../utils/guestEmail.js";
 
 const ALLOWED_ORDER_STATUSES = [
   "New",
@@ -173,6 +174,7 @@ function withDisplayStatuses(order) {
   const normalized = withNormalizedPaymentMode(order);
   return {
     ...normalized,
+    email: resolveOrderEmail(normalized.email, normalized.phone),
     // This is a presentation-only confirmation label. Persisted order_status
     // and fulfillment_status remain available for lifecycle/detail views.
     confirmation_status: deriveOrderConfirmationStatus(normalized),
@@ -355,13 +357,11 @@ function validateCreateOrder(body) {
     return { error: consent.error };
   }
 
-  let email = null;
-  if (emailRaw !== undefined && emailRaw !== null && emailRaw !== "") {
-    if (!isValidEmail(emailRaw)) {
-      return { error: "email must be a valid email address" };
-    }
-    email = emailRaw;
+  const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
+  if (suppliedEmail && !isValidEmail(suppliedEmail)) {
+    return { error: "email must be a valid email address" };
   }
+  const email = resolveOrderEmail(suppliedEmail, phone);
 
   return {
     data: {
@@ -454,13 +454,11 @@ function validateManualCodOrder(body) {
     return { error: "total_amount must be a positive number" };
   }
 
-  let email = null;
-  if (emailRaw !== undefined && emailRaw !== null && emailRaw !== "") {
-    if (!isValidEmail(emailRaw)) {
-      return { error: "email must be a valid email address" };
-    }
-    email = emailRaw;
+  const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
+  if (suppliedEmail && !isValidEmail(suppliedEmail)) {
+    return { error: "email must be a valid email address" };
   }
+  const email = resolveOrderEmail(suppliedEmail, phone);
 
   return {
     data: {
@@ -542,13 +540,11 @@ function validateWebsiteCodOrder(body) {
     return { error: consent.error };
   }
 
-  let email = null;
-  if (emailRaw !== undefined && emailRaw !== null && emailRaw !== "") {
-    if (!isValidEmail(emailRaw)) {
-      return { error: "email must be a valid email address" };
-    }
-    email = String(emailRaw).toLowerCase();
+  const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
+  if (suppliedEmail && !isValidEmail(suppliedEmail)) {
+    return { error: "email must be a valid email address" };
   }
+  const email = resolveOrderEmail(suppliedEmail, phone);
 
   return {
     data: {
@@ -993,7 +989,7 @@ export async function createOrder(req, res) {
     return res.status(201).json({
       success: true,
       message: "Order created successfully",
-      order: rows[0],
+      order: withDisplayStatuses(rows[0]),
     });
   } catch (error) {
     console.error("Orders API error:", error);

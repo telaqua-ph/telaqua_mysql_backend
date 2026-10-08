@@ -1,5 +1,6 @@
 import PDFDocument from "pdfkit";
 import { isCodOrder } from "./paymentMode.js";
+import { resolveOrderEmail } from "../utils/guestEmail.js";
 
 function money(value) {
   const amount = Number(value || 0);
@@ -89,7 +90,7 @@ export async function generateLocalInvoicePdf(order) {
     .text(String(order.customer_name || "Customer"), 45, 157)
     .text(String(order.address || ""), 45, 173, { width: 255 })
     .text([order.city, order.state, order.pincode].filter(Boolean).join(", "), 45, 189, { width: 255 })
-    .text(String(order.email || ""), 45, 205, { width: 255 });
+    .text(String(resolveOrderEmail(order.email, order.phone) || ""), 45, 205, { width: 255 });
 
   cell(doc, "Invoice date", 355, 140, 90, { bold: true });
   cell(doc, date(order.payment_date || order.invoice_generated_at), 445, 140, 105, { align: "right" });

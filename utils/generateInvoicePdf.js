@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
+import { resolveOrderEmail } from "./guestEmail.js";
 
 const PRODUCT_NAME =
   process.env.TELAQUA_PRODUCT_NAME || "Tel-Aqua pH Meter";
@@ -115,8 +116,9 @@ export function generateInvoicePdf(order, invoiceNumber, outputPath) {
     doc.fontSize(10).fillColor("#333333");
     doc.text(`Name: ${order.customer_name || "—"}`);
     doc.text(`Phone: ${order.phone || "—"}`);
-    if (order.email) {
-      doc.text(`Email: ${order.email}`);
+    const email = resolveOrderEmail(order.email, order.phone);
+    if (email) {
+      doc.text(`Email: ${email}`);
     }
     doc.text(`Address: ${buildAddress(order)}`);
 

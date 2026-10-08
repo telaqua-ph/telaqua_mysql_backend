@@ -9,6 +9,7 @@
 import crypto from "node:crypto";
 import { query } from "../config/db.js";
 import { isMissingColumnError } from "../lib/dbErrors.js";
+import { resolveOrderEmail } from "../utils/guestEmail.js";
 import {
   attributionValues,
   isMissingAttributionColumnError,
@@ -86,7 +87,7 @@ function validateCreatePaymentOrder(body) {
 
   const customer_name = trimStr(body.customer_name);
   const phone = trimStr(body.phone);
-  const email = trimStr(body.email);
+  const emailRaw = trimStr(body.email);
   const address = trimStr(body.address);
   const city = trimStr(body.city);
   const state = trimStr(body.state);
@@ -116,12 +117,11 @@ function validateCreatePaymentOrder(body) {
   if (!/^\d{10}$/.test(String(phone))) {
     return { error: "phone must contain exactly 10 digits" };
   }
-  if (!email) {
-    return { error: "email is required" };
-  }
-  if (!isValidEmail(String(email))) {
+  const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
+  if (suppliedEmail && !isValidEmail(suppliedEmail)) {
     return { error: "email must be a valid email address" };
   }
+  const email = resolveOrderEmail(suppliedEmail, phone);
   if (!address) {
     return { error: "address is required" };
   }
@@ -153,7 +153,7 @@ function validateCreatePaymentOrder(body) {
     data: {
       customer_name,
       phone: String(phone),
-      email: String(email).toLowerCase(),
+      email,
       address,
       city,
       state,
@@ -179,7 +179,7 @@ function validateCreateTestPaymentOrder(body) {
 
   const customer_name = trimStr(body.customer_name);
   const phone = trimStr(body.phone);
-  const email = trimStr(body.email);
+  const emailRaw = trimStr(body.email);
   const address = trimStr(body.address) || "TEST ORDER";
   const city = trimStr(body.city) || "TEST";
   const state = trimStr(body.state) || "TEST";
@@ -194,12 +194,11 @@ function validateCreateTestPaymentOrder(body) {
   if (!/^\d{10}$/.test(String(phone))) {
     return { error: "phone must contain exactly 10 digits" };
   }
-  if (!email) {
-    return { error: "email is required" };
-  }
-  if (!isValidEmail(String(email))) {
+  const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
+  if (suppliedEmail && !isValidEmail(suppliedEmail)) {
     return { error: "email must be a valid email address" };
   }
+  const email = resolveOrderEmail(suppliedEmail, phone);
   if (pincode !== "000000" && !/^\d{6}$/.test(String(pincode))) {
     return { error: "pincode must contain exactly 6 digits" };
   }
@@ -231,7 +230,7 @@ function validateCreateTestPaymentOrder(body) {
     data: {
       customer_name,
       phone: String(phone),
-      email: String(email).toLowerCase(),
+      email,
       address: String(address),
       city: String(city),
       state: String(state),
@@ -1095,6 +1094,8 @@ export async function createPaymentOrder(req, res) {
 
     return res.status(201).json({
       success: true,
+      phone: orderData.phone,
+      email: orderData.email,
       order_id: razorpayOrder.id,
       db_order_id: dbOrderId,
       order_number: orderNumber,
@@ -1340,6 +1341,8 @@ export async function createTestPaymentOrder(req, res) {
     // Same public shape as create-order (key_id only — never secret)
     return res.status(201).json({
       success: true,
+      phone: orderData.phone,
+      email: orderData.email,
       order_id: razorpayOrder.id,
       db_order_id: dbOrderId,
       order_number: orderNumber,
