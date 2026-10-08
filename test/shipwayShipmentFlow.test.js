@@ -132,7 +132,10 @@ async function withHarness({ db, responses = [] }, body) {
   globalThis.fetch = async (url, request = {}) => {
     const href = String(url);
     calls.push({ url: href, method: request.method || "GET", body: request.body ? JSON.parse(request.body) : null });
-    const next = responses.shift();
+    const carrierLookup = /\/api\/getcarrier$/.test(href);
+    const next = carrierLookup && !responses[0]?.match?.test(href)
+      ? { match: /\/api\/getcarrier$/, body: { success: 1, message: [{ id: "3411", name: "Delhivery Surface" }] } }
+      : responses.shift();
     if (!next) throw new Error(`Unexpected outbound request: ${href.replace(/\?.*/, "")}`);
     assert.match(href, next.match, "outbound request went to the wrong Shipway endpoint");
     return new Response(JSON.stringify(next.body), { status: next.status || 200 });
@@ -166,6 +169,7 @@ async function call(handler, req) {
 
 const shipmentRow = (overrides = {}) => ({ id: 1, order_id: 873, sequence_no: 1, environment: "staging", fulfillment_status: "unfulfilled", provider: null, courier_name: "Delhivery", ...overrides });
 const v2orders = (body, status = 200) => ({ match: /\/api\/v2orders$/, body, status });
+const getcarrier = (body, status = 200) => ({ match: /\/api\/getcarrier$/, body, status });
 const getorders = (body, status = 200) => ({ match: /\/api\/getorders\?orderid=TAQ-000873$/, body, status });
 const assertNoSecrets = (logs) => {
   const text = JSON.stringify(logs);
@@ -176,13 +180,9 @@ const assertNoSecrets = (logs) => {
 
 /* ---------- Payload ---------- */
 
-test("Shipway Auto Assignment omits carrier_id for every legacy SHIPWAY_CARRIER_ID value", () => {
-  for (const value of [undefined, "", "   ", "null", "undefined", "0", "-5", "12.5", "109177", "Shipway-Delhivery", "3411abc", "3411", "99999999999999999999"]) {
-    if (value === undefined) delete env.SHIPWAY_CARRIER_ID; else env.SHIPWAY_CARRIER_ID = value;
-    const payload = buildShipwayPayload(baseOrder, product);
-    assert.equal(Object.hasOwn(payload, "carrier_id"), false, `carrier_id must be omitted for ${JSON.stringify(value)}`);
-  }
-  delete env.SHIPWAY_CARRIER_ID;
+test("Shipway payload includes a validated carrier_id", () => {
+  assert.equal(buildShipwayPayload(baseOrder, product, { carrierId: "3411" }).carrier_id, 3411);
+  assert.equal(Object.hasOwn(buildShipwayPayload(baseOrder, product, { carrierId: "invalid" }), "carrier_id"), false);
 });
 
 test("Shipway payload has no undefined keys and omits a blank email", () => {
@@ -264,11 +264,12 @@ test("successful booking saves provider, carrier, AWB, label and Ready to Ship; 
     assert.equal(second.statusCode, 200);
     assert.equal(second.body.already_created, true);
     assert.equal(second.body.waybill, "SW900873");
-    assert.equal(calls.length, 1, "the second click must not call Shipway");
+    assert.equal(calls.length, 2, "only the first click may call Shipway");
 
     const verification = logs.find(([label]) => label === "[Shipway] outgoing booking verification");
-    assert.equal(verification[1].autoAssignment, true);
-    assert.equal(verification[1].payloadKeys.includes("carrier_id"), false);
+    assert.equal(verification[1].autoAssignment, false);
+    assert.equal(verification[1].carrierId, 3411);
+    assert.equal(verification[1].payloadKeys.includes("carrier_id"), true);
     assert.equal(verification[1].orderNumber, "TAQ-000873");
     assertNoSecrets(logs);
   });
@@ -295,7 +296,7 @@ test("rejected booking saves nothing, releases the lock, and a retry looks up th
 
     const retry = await call(createOrderShipment, { params: { orderId: "873" } });
     assert.equal(retry.statusCode, 201, JSON.stringify(retry.body));
-    assert.deepEqual(calls.map((entry) => entry.url.replace(/\?.*/, "").split("/").at(-1)), ["v2orders", "getorders", "v2orders"]);
+    assert.deepEqual(calls.map((entry) => entry.url.replace(/\?.*/, "").split("/").at(-1)), ["getcarrier", "v2orders", "getorders", "getcarrier", "v2orders"]);
     assert.equal(shipment.processing_token, null);
     assert.equal(db.shipments.get(shipment.id).waybill_number, "SW900873");
     assertNoSecrets(logs);
@@ -336,6 +337,20 @@ test("an uncertain booking outcome keeps the lock", async () => {
     assert.equal(res.statusCode, 409);
     const [shipment] = db.shipments.values();
     assert.ok(shipment.processing_token, "lock must be kept for reconciliation");
+    assert.equal(shipment.waybill_number ?? null, null);
+  });
+});
+
+test("no active Shipway carrier releases the lock and never calls v2orders", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  await withHarness({ db, responses: [getcarrier({ success: 1, message: "No carrier found" })] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 422);
+    assert.equal(res.body.retryable, true);
+    assert.match(res.body.message, /No active Shipway carrier/);
+    assert.equal(calls.filter((entry) => /v2orders/.test(entry.url)).length, 0);
+    const [shipment] = db.shipments.values();
+    assert.equal(shipment.processing_token, null);
     assert.equal(shipment.waybill_number ?? null, null);
   });
 });

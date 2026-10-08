@@ -2,6 +2,7 @@ import { getShipwayConfig } from "../config/shipwayConfig.js";
 
 const ENDPOINT = "https://app.shipway.com/api/v2orders";
 const GET_ORDERS_ENDPOINT = "https://app.shipway.com/api/getorders";
+const GET_CARRIERS_ENDPOINT = "https://app.shipway.com/api/getcarrier";
 const TIMEOUT_MS = 20_000;
 
 const messageOf = (body, fallback) => String(body?.message || body?.error || body?.errors?.[0]?.message || fallback).replace(/[\r\n]+/g, " ").slice(0, 900);
@@ -92,7 +93,8 @@ export async function createShipwayShipment(payload) {
     const orderNumber = payload.order_id;
     console.info('[Shipway] outgoing booking verification', {
       orderNumber,
-      autoAssignment: true,
+      autoAssignment: payload.carrier_id == null,
+      carrierId: payload.carrier_id ?? null,
       payloadKeys: Object.keys(payload),
     });
     const response = await fetch(ENDPOINT, {
@@ -121,6 +123,72 @@ export async function createShipwayShipment(payload) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function carrierLookupError(message, { body = null, httpStatus = null, cause = null } = {}) {
+  const error = new Error(message);
+  error.code = "SHIPWAY_CARRIER_LOOKUP_FAILED";
+  error.upstreamBody = body;
+  error.status = httpStatus;
+  error.cause = cause;
+  shipwayDiagnostics({ httpStatus, body, error, operation: "carrier_lookup" });
+  return error;
+}
+
+/** Read active carriers before booking; carrier IDs are account-specific. */
+export async function getShipwayCarriers() {
+  const config = getShipwayConfig();
+  const authorization = Buffer.from(`${config.email}:${config.licenseKey}`, "utf8").toString("base64");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(GET_CARRIERS_ENDPOINT, {
+      headers: { Authorization: `Basic ${authorization}`, Accept: "application/json" },
+      signal: controller.signal,
+    });
+  } catch (cause) {
+    throw carrierLookupError("Shipway carrier lookup could not be completed; the shipment was not booked.", { cause });
+  } finally {
+    clearTimeout(timer);
+  }
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw carrierLookupError(`Shipway carrier lookup returned HTTP ${response.status}.`, { body, httpStatus: response.status });
+  }
+  if (String(body?.success) !== "1") {
+    throw carrierLookupError("Shipway carrier lookup returned an unrecognised response; the shipment was not booked.", { body, httpStatus: response.status });
+  }
+  if (typeof body?.message === "string" && /^no carrier found\.?$/i.test(body.message.trim())) return [];
+  if (!Array.isArray(body?.message)) {
+    throw carrierLookupError("Shipway carrier lookup returned an unrecognised response; the shipment was not booked.", { body, httpStatus: response.status });
+  }
+  return body.message.flatMap((carrier) => {
+    const id = String(carrier?.id ?? "").trim();
+    if (!/^\d+$/.test(id) || !Number.isSafeInteger(Number(id)) || Number(id) <= 0) return [];
+    return [{ id, name: String(carrier?.name ?? "").trim(), title: String(carrier?.carrier_title ?? "").trim() }];
+  });
+}
+
+export async function resolveShipwayCarrier() {
+  const carriers = await getShipwayCarriers();
+  if (!carriers.length) {
+    const error = new Error("Shipway: No active Shipway carrier/courier is configured on this account, so the shipment was not booked. Please activate a courier and courier priority rule in Shipway, then retry.");
+    error.code = "SHIPWAY_NO_CARRIER";
+    throw error;
+  }
+  const configuredId = String(process.env.SHIPWAY_CARRIER_ID || "").trim();
+  if (configuredId) {
+    const carrier = carriers.find((item) => item.id === configuredId);
+    if (!carrier) {
+      const error = new Error(`SHIPWAY_CARRIER_ID ${configuredId} is not active in Shipway. Active carriers: ${carriers.map((item) => `${item.id} (${item.name || item.title || "unnamed"})`).join(", ")}.`);
+      error.code = "SHIPWAY_CONFIG_ERROR";
+      throw error;
+    }
+    return { carrierId: carrier.id, carrierName: carrier.name || carrier.title || null, source: "configured" };
+  }
+  const carrier = carriers[0];
+  return { carrierId: carrier.id, carrierName: carrier.name || carrier.title || null, source: "shipway" };
 }
 
 /** Read-only reconciliation. It never creates, modifies, or cancels a Shipway order. */

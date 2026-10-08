@@ -10,7 +10,7 @@ const splitName = (name) => {
 };
 
 /** Build Shipway v2orders payload solely from stored order data and product defaults. */
-export function buildShipwayPayload(order, product) {
+export function buildShipwayPayload(order, product, { carrierId } = {}) {
   const config = getShipwayConfig();
   const quantity = Math.max(1, Number(order.quantity) || 1);
   const total = Number(order.final_total ?? order.total_amount);
@@ -66,7 +66,9 @@ export function buildShipwayPayload(order, product) {
   };
   const email = text(order.email);
   if (email) payload.email = email;
-  // Deliberately omit carrier_id. Shipway selects the serviceable courier from
-  // the dashboard's Courier Priority / Auto Assignment configuration.
+  const normalizedCarrierId = String(carrierId ?? "").trim();
+  if (/^\d+$/.test(normalizedCarrierId) && Number.isSafeInteger(Number(normalizedCarrierId)) && Number(normalizedCarrierId) > 0) {
+    payload.carrier_id = Number(normalizedCarrierId);
+  }
   return payload;
 }

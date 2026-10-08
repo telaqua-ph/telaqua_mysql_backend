@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { assertShipwayBookingSucceeded, createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection } from "../services/shipwayService.js";
+import { assertShipwayBookingSucceeded, createShipwayShipment, findShipwayOrder, getShipwayCarriers, isDefinitiveShipwayBookingRejection, resolveShipwayCarrier } from "../services/shipwayService.js";
 import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSafety.js";
 
 const env = process.env;
@@ -31,26 +31,68 @@ test("Shipway payload uses stored order values and configured Shipway warehouses
   assert.equal(Object.hasOwn(payload, "carrier_id"), false);
 });
 
-test("Shipway Auto Assignment always omits carrier_id, including when a legacy variable is set", () => {
-  env.SHIPWAY_CARRIER_ID = "3411";
-  assert.equal(Object.hasOwn(buildShipwayPayload(order, product), "carrier_id"), false);
-  delete env.SHIPWAY_CARRIER_ID;
+test("Shipway payload includes only a valid supplied carrier_id", () => {
+  assert.equal(buildShipwayPayload(order, product, { carrierId: "3411" }).carrier_id, 3411);
+  for (const carrierId of ["", "0", "-5", "12.5", "abc", "99999999999999999999"]) {
+    assert.equal(Object.hasOwn(buildShipwayPayload(order, product, { carrierId }), "carrier_id"), false);
+  }
 });
 
-test("Shipway Auto Assignment POST payload does not contain carrier_id", async () => {
+test("Shipway booking POST contains the resolved carrier_id", async () => {
   const prior = globalThis.fetch;
   let requests = 0;
   globalThis.fetch = async (_url, request) => {
     requests += 1;
-    assert.equal(Object.hasOwn(JSON.parse(request.body), "carrier_id"), false);
+    assert.equal(JSON.parse(request.body).carrier_id, 3411);
     return new Response(JSON.stringify({ success: false, message: "No Courier Found." }), { status: 200 });
   };
-  env.SHIPWAY_CARRIER_ID = "3411";
-  const payload = buildShipwayPayload(order, product);
+  const payload = buildShipwayPayload(order, product, { carrierId: "3411" });
   await assert.rejects(() => createShipwayShipment(payload), { code: "SHIPWAY_PARTIAL_OR_REJECTED" });
   assert.equal(requests, 1);
-  delete env.SHIPWAY_CARRIER_ID;
   globalThis.fetch = prior;
+});
+
+test("Shipway carrier lookup and resolution use active carrier IDs only", async () => {
+  const prior = globalThis.fetch;
+  const priorCarrier = env.SHIPWAY_CARRIER_ID;
+  const requests = [];
+  globalThis.fetch = async (url, request) => {
+    requests.push({ url: String(url), request });
+    return new Response(JSON.stringify({ success: 1, error: "", message: [
+      { id: "18708", name: "Sequel Logistics", carrier_title: "Sequel" },
+      { id: "3411", name: "Delhivery", carrier_title: "Delhivery Surface" },
+      { id: "bad", name: "Ignored" },
+    ] }), { status: 200 });
+  };
+  try {
+    assert.deepEqual(await getShipwayCarriers(), [
+      { id: "18708", name: "Sequel Logistics", title: "Sequel" },
+      { id: "3411", name: "Delhivery", title: "Delhivery Surface" },
+    ]);
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /\/api\/getcarrier$/);
+    assert.match(requests[0].request.headers.Authorization, /^Basic /);
+    assert.deepEqual(await resolveShipwayCarrier(), { carrierId: "18708", carrierName: "Sequel Logistics", source: "shipway" });
+    env.SHIPWAY_CARRIER_ID = "3411";
+    assert.deepEqual(await resolveShipwayCarrier(), { carrierId: "3411", carrierName: "Delhivery", source: "configured" });
+    env.SHIPWAY_CARRIER_ID = "999";
+    await assert.rejects(() => resolveShipwayCarrier(), { code: "SHIPWAY_CONFIG_ERROR" });
+  } finally {
+    if (priorCarrier === undefined) delete env.SHIPWAY_CARRIER_ID; else env.SHIPWAY_CARRIER_ID = priorCarrier;
+    globalThis.fetch = prior;
+  }
+});
+
+test("carrier lookup reports no carriers, HTTP failures, and network errors safely", async () => {
+  const prior = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ success: 1, message: "No carrier found" }), { status: 200 });
+    await assert.rejects(() => resolveShipwayCarrier(), { code: "SHIPWAY_NO_CARRIER" });
+    globalThis.fetch = async () => new Response(JSON.stringify({ message: "Unauthorized" }), { status: 401 });
+    await assert.rejects(() => getShipwayCarriers(), { code: "SHIPWAY_CARRIER_LOOKUP_FAILED" });
+    globalThis.fetch = async () => { throw new Error("offline"); };
+    await assert.rejects(() => getShipwayCarriers(), { code: "SHIPWAY_CARRIER_LOOKUP_FAILED" });
+  } finally { globalThis.fetch = prior; }
 });
 
 test("Shipway success requires both booking and label-generation responses", () => {
