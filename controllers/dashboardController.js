@@ -37,6 +37,8 @@ function mapStatsRow(row, from, to) {
     paidOrders: Number(row.paid_orders || 0),
     pendingPayments: Number(row.pending_payments || 0),
     codOrders: Number(row.cod_orders || 0),
+    codPaidOrders: Number(row.cod_paid_orders || 0),
+    rtoReturnOrders: Number(row.rto_return_orders || 0),
     cancelledOrders: Number(row.cancelled_orders || 0),
     shipmentsCreated: Number(row.shipments_created || 0),
     unseenOrders: Number(row.unseen_orders || 0),
@@ -349,14 +351,17 @@ async function fetchDashboardStats({ adminId, from, to }) {
     : "''";
   /* Shipments returning to origin (RTO in transit) or already returned are not sales. */
   const rtoStatuses = "'rto', 'returned'";
-  const rtoFilters = [];
+  const rtoSignals = [];
   if (columns.has("fulfillment_status")) {
-    rtoFilters.push(`LOWER(TRIM(COALESCE(fulfillment_status, ''))) NOT IN (${rtoStatuses})`);
+    rtoSignals.push(`LOWER(TRIM(COALESCE(fulfillment_status, ''))) IN (${rtoStatuses})`);
   }
   if (includeShipmentsTable) {
-    rtoFilters.push(`LOWER(TRIM(COALESCE(shipment_fulfillment_status, ''))) NOT IN (${rtoStatuses})`);
+    rtoSignals.push(`LOWER(TRIM(COALESCE(shipment_fulfillment_status, ''))) IN (${rtoStatuses})`);
   }
-  const notRtoFilter = rtoFilters.map((f) => `AND ${f}`).join("\n           ");
+  // logisticsState.js is the canonical carrier-status mapper. It stores all
+  // RTO/return variants as `rto` or `returned` on the order and shipment.
+  const rtoOrderExpr = rtoSignals.length ? `(${rtoSignals.join(" OR ")})` : "FALSE";
+  const notRtoFilter = `AND NOT ${rtoOrderExpr}`;
   const paidTestFilter = columns.has("is_test_order")
     ? "AND COALESCE(is_test_order, 0) = 0"
     : "";
@@ -382,6 +387,9 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Paid' THEN 1 ELSE 0 END) AS SIGNED) AS paid_orders,
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Pending' THEN 1 ELSE 0 END) AS SIGNED) AS pending_payments,
          CAST(SUM(CASE WHEN ${codExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_orders,
+         /* These two fields partition the former COD Paid count exactly. */
+         CAST(SUM(CASE WHEN ${codExpr} AND LOWER(TRIM(${paymentStatusExpr})) = 'paid' AND NOT ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_paid_orders,
+         CAST(SUM(CASE WHEN ${codExpr} AND LOWER(TRIM(${paymentStatusExpr})) = 'paid' AND ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS rto_return_orders,
          CAST(SUM(CASE WHEN ${shipmentExpr} THEN 1 ELSE 0 END) AS SIGNED) AS shipments_created,
          CAST(SUM(CASE WHEN cancellation_evidence THEN 1 ELSE 0 END) AS SIGNED) AS cancelled_orders,
          CAST(SUM(CASE WHEN ${unseenPredicate} THEN 1 ELSE 0 END) AS SIGNED) AS unseen_orders
@@ -570,6 +578,8 @@ export async function getStats(req, res) {
         paidOrders: 0,
         pendingPayments: 0,
         codOrders: 0,
+        codPaidOrders: 0,
+        rtoReturnOrders: 0,
         shipmentsCreated: 0,
         cancelledOrders: 0,
         unseenOrders: 0,
