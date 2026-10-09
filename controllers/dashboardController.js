@@ -550,6 +550,15 @@ async function fetchDashboardStats({ adminId, from, to }) {
   return rows[0] || null;
 }
 
+/**
+ * The all-time Dashboard "Total Devices Sold" value. Keep consumers on this
+ * single aggregate so order eligibility never diverges between screens.
+ */
+export async function getAllTimeTotalDevicesSold(adminId) {
+  const stats = await fetchDashboardStats({ adminId, from: null, to: null });
+  return Number(stats?.devices_sold || 0) + Number(stats?.cod_pending_devices || 0);
+}
+
 export async function getStats(req, res) {
   const adminId = Number(req.user?.admin_id || req.user?.id);
   if (!Number.isInteger(adminId) || adminId <= 0) {

@@ -12,6 +12,7 @@ import {
   markNotificationRead,
   updateLowStockThreshold,
 } from "../services/inventoryService.js";
+import { getAllTimeTotalDevicesSold } from "./dashboardController.js";
 import { isMissingTableError } from "../lib/dbErrors.js";
 
 function adminId(req) {
@@ -21,7 +22,13 @@ function adminId(req) {
 
 export async function getInventory(req, res) {
   try {
-    const data = await getInventorySummary();
+    const [data, dashboardSold] = await Promise.all([
+      getInventorySummary(),
+      getAllTimeTotalDevicesSold(adminId(req)),
+    ]);
+    // Intentionally independent from stock movement history: this card must
+    // always equal Dashboard > Total Devices Sold.
+    data.totals.sold = dashboardSold;
     return res.status(200).json({ success: true, ...data });
   } catch (err) {
     console.error("GET inventory error:", err?.message);
