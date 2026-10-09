@@ -1,4 +1,4 @@
-const GUEST_EMAIL_DOMAIN = "@guest_telaqua.in";
+const GUEST_EMAIL_DOMAIN = "@guest.tel-aqua.in";
 
 export function normalizePhoneForGuestEmail(phoneNumber) {
   let digits = String(phoneNumber ?? "").replace(/\D/g, "");
