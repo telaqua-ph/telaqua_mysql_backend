@@ -306,7 +306,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
         AND s.sequence_no = 1`
     : "";
   const shipmentsSelect = includeShipmentsTable
-    ? "s.waybill_number AS shipment_waybill_number, s.fulfillment_status AS shipment_fulfillment_status,"
+    ? "s.waybill_number AS shipment_waybill_number, s.fulfillment_status AS shipment_fulfillment_status, s.shipment_status AS shipment_tracking_status,"
     : "";
   const unseenPredicate = includeViews ? "is_seen = 0" : "FALSE";
   const revenueExpr = revenueExpression(columns);
@@ -355,8 +355,14 @@ async function fetchDashboardStats({ adminId, from, to }) {
   if (columns.has("fulfillment_status")) {
     rtoSignals.push(`LOWER(TRIM(COALESCE(fulfillment_status, ''))) IN (${rtoStatuses})`);
   }
+  // Older and Shipway rows can retain the carrier's raw tracking text rather
+  // than the normalized fulfillment value. This reads that source data too.
+  if (columns.has("shipment_status")) {
+    rtoSignals.push(`LOWER(COALESCE(shipment_status, '')) REGEXP '(^|[^a-z])rto([^a-z]|$)|return'`);
+  }
   if (includeShipmentsTable) {
     rtoSignals.push(`LOWER(TRIM(COALESCE(shipment_fulfillment_status, ''))) IN (${rtoStatuses})`);
+    rtoSignals.push(`LOWER(COALESCE(shipment_tracking_status, '')) REGEXP '(^|[^a-z])rto([^a-z]|$)|return'`);
   }
   // logisticsState.js is the canonical carrier-status mapper. It stores all
   // RTO/return variants as `rto` or `returned` on the order and shipment.
