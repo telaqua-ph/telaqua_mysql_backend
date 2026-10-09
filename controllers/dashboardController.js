@@ -393,6 +393,8 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Paid' THEN 1 ELSE 0 END) AS SIGNED) AS paid_orders,
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Pending' THEN 1 ELSE 0 END) AS SIGNED) AS pending_payments,
          CAST(SUM(CASE WHEN ${codExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_orders,
+         /* Mirrors the Dashboard Razorpay Paid Orders card: paid, non-COD. */
+         CAST(SUM(CASE WHEN ${razorpayExpr} AND LOWER(TRIM(${paymentStatusExpr})) = 'paid' THEN 1 ELSE 0 END) AS SIGNED) AS razorpay_paid_orders,
          /* Paid COD excludes RTO/return shipments. RTO/return is its own
           * operational count, independent of payment method or status. */
          CAST(SUM(CASE WHEN ${codExpr} AND LOWER(TRIM(${paymentStatusExpr})) = 'paid' AND NOT ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_paid_orders,
@@ -550,13 +552,10 @@ async function fetchDashboardStats({ adminId, from, to }) {
   return rows[0] || null;
 }
 
-/**
- * The all-time Dashboard "Total Devices Sold" value. Keep consumers on this
- * single aggregate so order eligibility never diverges between screens.
- */
-export async function getAllTimeTotalDevicesSold(adminId) {
+/** The Inventory Sold card uses the two Dashboard paid-order aggregates. */
+export async function getInventorySoldOrderCount(adminId) {
   const stats = await fetchDashboardStats({ adminId, from: null, to: null });
-  return Number(stats?.devices_sold || 0) + Number(stats?.cod_pending_devices || 0);
+  return Number(stats?.razorpay_paid_orders || 0) + Number(stats?.cod_paid_orders || 0);
 }
 
 export async function getStats(req, res) {

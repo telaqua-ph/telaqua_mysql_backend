@@ -12,7 +12,7 @@ import {
   markNotificationRead,
   updateLowStockThreshold,
 } from "../services/inventoryService.js";
-import { getAllTimeTotalDevicesSold } from "./dashboardController.js";
+import { getInventorySoldOrderCount } from "./dashboardController.js";
 import { isMissingTableError } from "../lib/dbErrors.js";
 
 function adminId(req) {
@@ -24,11 +24,12 @@ export async function getInventory(req, res) {
   try {
     const [data, dashboardSold] = await Promise.all([
       getInventorySummary(),
-      getAllTimeTotalDevicesSold(adminId(req)),
+      getInventorySoldOrderCount(adminId(req)),
     ]);
-    // Intentionally independent from stock movement history: this card must
-    // always equal Dashboard > Total Devices Sold.
+    // Sold follows Dashboard Razorpay Paid + COD Paid, not stock history.
+    // Remaining is intentionally derived from the unchanged total stock.
     data.totals.sold = dashboardSold;
+    data.totals.remaining = Number(data.totals.total_stock || 0) - dashboardSold;
     return res.status(200).json({ success: true, ...data });
   } catch (err) {
     console.error("GET inventory error:", err?.message);
