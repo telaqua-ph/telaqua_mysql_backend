@@ -232,6 +232,8 @@ function matchesExportMetric(order, metric) {
   const rto = ["rto", "returned"].includes(exportText(order.fulfillment_status).toLowerCase());
   const confirmed = deriveOrderConfirmationStatus(order) === "Confirmed" && !cancelled;
   if (metric === "new") return ["new", "pending"].includes(status);
+  if (metric === "cod_paid") return isCod && payment === "paid" && !rto;
+  if (metric === "rto_return") return isCod && payment === "paid" && rto;
   if (metric === "sales_devices") return confirmed && !rto && payment === "paid";
   if (metric === "sales_cod_pending_devices") return confirmed && !rto && mode === "cod" && payment !== "paid";
   if (metric === "sales_total_devices") {
