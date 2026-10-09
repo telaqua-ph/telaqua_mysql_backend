@@ -393,9 +393,10 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Paid' THEN 1 ELSE 0 END) AS SIGNED) AS paid_orders,
          CAST(SUM(CASE WHEN ${paymentStatusExpr} = 'Pending' THEN 1 ELSE 0 END) AS SIGNED) AS pending_payments,
          CAST(SUM(CASE WHEN ${codExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_orders,
-         /* These two fields partition the former COD Paid count exactly. */
+         /* Paid COD excludes RTO/return shipments. RTO/return is its own
+          * operational count, independent of payment method or status. */
          CAST(SUM(CASE WHEN ${codExpr} AND LOWER(TRIM(${paymentStatusExpr})) = 'paid' AND NOT ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_paid_orders,
-         CAST(SUM(CASE WHEN ${codExpr} AND LOWER(TRIM(${paymentStatusExpr})) = 'paid' AND ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS rto_return_orders,
+         CAST(SUM(CASE WHEN ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS rto_return_orders,
          CAST(SUM(CASE WHEN ${shipmentExpr} THEN 1 ELSE 0 END) AS SIGNED) AS shipments_created,
          CAST(SUM(CASE WHEN cancellation_evidence THEN 1 ELSE 0 END) AS SIGNED) AS cancelled_orders,
          CAST(SUM(CASE WHEN ${unseenPredicate} THEN 1 ELSE 0 END) AS SIGNED) AS unseen_orders
