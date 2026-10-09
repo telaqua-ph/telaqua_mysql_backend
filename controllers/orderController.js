@@ -229,7 +229,15 @@ function matchesExportMetric(order, metric) {
   );
   const razorpayFailedOrPending = !isCod && ["failed", "pending"].includes(payment);
   const cancelled = Number(order.is_cancelled) === 1 || status === "cancelled";
-  const rto = ["rto", "returned"].includes(exportText(order.fulfillment_status).toLowerCase());
+  const rto = [
+    order.fulfillment_status,
+    order.shipment_status,
+    order.tracking_status,
+  ].some((value) => {
+    const shipmentState = exportText(value).toLowerCase();
+    return shipmentState === "rto" || shipmentState === "returned" ||
+      /(^|[^a-z])rto([^a-z]|$)|return/.test(shipmentState);
+  });
   const confirmed = deriveOrderConfirmationStatus(order) === "Confirmed" && !cancelled;
   if (metric === "new") return ["new", "pending"].includes(status);
   if (metric === "cod_paid") return isCod && payment === "paid" && !rto;
