@@ -400,7 +400,9 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(SUM(CASE WHEN ${codExpr} AND LOWER(TRIM(${paymentStatusExpr})) = 'paid' AND NOT ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cod_paid_orders,
          CAST(SUM(CASE WHEN ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS rto_return_orders,
          CAST(SUM(CASE WHEN ${shipmentExpr} THEN 1 ELSE 0 END) AS SIGNED) AS shipments_created,
-         CAST(SUM(CASE WHEN cancellation_evidence THEN 1 ELSE 0 END) AS SIGNED) AS cancelled_orders,
+         /* RTO/return uses the same predicate as the former RTO card. An
+          * order that is both cancelled and RTO is counted once. */
+         CAST(SUM(CASE WHEN cancellation_evidence OR ${rtoOrderExpr} THEN 1 ELSE 0 END) AS SIGNED) AS cancelled_orders,
          CAST(SUM(CASE WHEN ${unseenPredicate} THEN 1 ELSE 0 END) AS SIGNED) AS unseen_orders
        FROM order_rows o
      ),

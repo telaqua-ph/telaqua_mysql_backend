@@ -242,6 +242,7 @@ function matchesExportMetric(order, metric) {
   if (metric === "new") return ["new", "pending"].includes(status);
   if (metric === "cod_paid") return isCod && payment === "paid" && !rto;
   if (metric === "rto_return") return rto;
+  if (metric === "cancelled") return cancelled || rto;
   if (metric === "sales_devices") return confirmed && !rto && payment === "paid";
   if (metric === "sales_cod_pending_devices") return confirmed && !rto && mode === "cod" && payment !== "paid";
   if (metric === "sales_total_devices") {
