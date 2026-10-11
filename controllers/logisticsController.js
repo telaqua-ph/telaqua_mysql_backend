@@ -36,6 +36,8 @@ import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
 import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection, isHttpUrl, resolveShipwayCarrier } from "../services/shipwayService.js";
 import { DELHIVERY_ONLY_SQL, assertDelhiveryManagedShipment, isShipwayShipment } from "../services/shipmentProvider.js";
+import { recordShipwayTrackingFailure, refreshShipwayShipment } from "../services/shipwayTrackingSyncService.js";
+import { safeShipwayTrackingError } from "../services/shipwayService.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -1017,6 +1019,90 @@ export async function getOrderLogistics(req, res) {
     if (shipment) history = (await query("SELECT * FROM shipment_tracking_history WHERE shipment_id=? ORDER BY COALESCE(event_time, created_at) ASC", [shipment.id])).rows;
     return res.json({ success: true, order_id: orderId, payment_status: order.payment_status, fulfillment_status: shipment?.fulfillment_status || order.fulfillment_status || "unfulfilled", shipment, tracking_history: history });
   } catch (error) { return apiError(res, error, "Unable to load order logistics"); }
+}
+
+/* ---------- Shipway tracking (read-only getorders; never Delhivery, never v2orders) ---------- */
+
+// Upstream 401/403 are reported as 502 so the admin client does not treat them as its own session expiring.
+const SHIPWAY_TRACKING_HTTP = {
+  SHIPWAY_TRACKING_NOT_SHIPWAY: 409,
+  SHIPWAY_TRACKING_NO_AWB: 409,
+  SHIPWAY_TRACKING_NO_IDENTIFIER: 409,
+  SHIPWAY_TRACKING_NOT_FOUND: 404,
+  SHIPWAY_TRACKING_RATE_LIMITED: 429,
+  SHIPWAY_TRACKING_TIMEOUT: 504,
+  SHIPWAY_TRACKING_AUTH: 502,
+  SHIPWAY_TRACKING_NETWORK: 502,
+  SHIPWAY_TRACKING_UPSTREAM: 502,
+  SHIPWAY_TRACKING_INVALID_RESPONSE: 502,
+  SHIPWAY_CONFIG_ERROR: 503,
+};
+
+function shipwayTrackingError(res, error) {
+  const status = SHIPWAY_TRACKING_HTTP[error?.code];
+  if (!status) return apiError(res, error, "Unable to refresh Shipway tracking");
+  console.warn("Shipway tracking refresh failed", safeShipwayTrackingError(error));
+  return res.status(status).json({ success: false, code: error.code, retryable: Boolean(error.retryable), message: error.message });
+}
+
+async function shipwayShipmentForOrder(orderId) {
+  const order = await orderById(orderId, pool);
+  if (!order) return { status: 404, message: "Order not found." };
+  const shipment = await shipmentForOrder(orderId, pool);
+  if (!shipment || !isShipwayShipment(shipment)) return { status: 409, message: "This order has no Shipway shipment." };
+  return { order, shipment: { ...shipment, shipway_order_number: shipwayOrderNumber(order) } };
+}
+
+async function shipwayTrackingView(shipment) {
+  const history = await pool.query("SELECT * FROM shipment_tracking_history WHERE shipment_id=? ORDER BY COALESCE(event_time, created_at) ASC", [shipment.id]);
+  return {
+    shipment_id: shipment.id,
+    order_id: shipment.order_id,
+    provider: shipment.provider,
+    waybill: shipment.waybill_number,
+    courier_name: shipment.courier_name,
+    carrier_id: shipment.carrier_id,
+    fulfillment_status: shipment.fulfillment_status,
+    shipment_status: shipment.shipment_status,
+    shipment_status_code: shipment.shipment_status_code,
+    shipment_status_at: shipment.shipment_status_at,
+    current_location: shipment.current_location,
+    expected_delivery_date: shipment.expected_delivery_date,
+    delivered_at: shipment.delivered_at,
+    last_tracking_update: shipment.last_tracking_update,
+    last_error: shipment.last_error,
+    tracking_history: history.rows,
+  };
+}
+
+export async function getShipwayOrderTracking(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  try {
+    const found = await shipwayShipmentForOrder(orderId);
+    if (!found.shipment) return res.status(found.status).json({ success: false, message: found.message });
+    return res.json({ success: true, ...(await shipwayTrackingView(found.shipment)) });
+  } catch (error) { return apiError(res, error, "Unable to load Shipway tracking"); }
+}
+
+export async function refreshShipwayOrderTracking(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  let shipment = null;
+  try {
+    const found = await shipwayShipmentForOrder(orderId);
+    if (!found.shipment) return res.status(found.status).json({ success: false, message: found.message });
+    shipment = found.shipment;
+    const result = await refreshShipwayShipment(shipment, { actorId: adminId(req) });
+    const latest = await shipmentById(shipment.id, pool);
+    return res.json({ success: true, message: "Shipway tracking refreshed.", ...result, ...(await shipwayTrackingView({ ...shipment, ...latest })) });
+  } catch (error) {
+    // Failures never clear stored tracking; only last_error is recorded.
+    if (shipment?.id && !["SHIPWAY_TRACKING_NOT_SHIPWAY", "SHIPWAY_TRACKING_NO_AWB"].includes(error?.code)) {
+      await recordShipwayTrackingFailure(shipment.id, error, { deferRetry: false });
+    }
+    return shipwayTrackingError(res, error);
+  }
 }
 
 async function compatibilityShipment(req) {

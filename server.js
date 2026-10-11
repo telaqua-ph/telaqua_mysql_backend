@@ -10,6 +10,7 @@ import app from "./app.js";
 import { isDatabaseConfigured } from "./config/db.js";
 import { buildIdentity } from "./lib/buildIdentity.js";
 import { startLogisticsTrackingSync, stopLogisticsTrackingSync } from "./services/logisticsSyncService.js";
+import { startShipwayTrackingSync, stopShipwayTrackingSync } from "./services/shipwayTrackingSyncService.js";
 import { startCheckoutReminderSync, stopCheckoutReminderSync } from "./services/checkoutReminderService.js";
 import { startOrderPushWorker, stopOrderPushWorker } from "./services/orderPushWorker.js";
 import { isWebPushConfigured } from "./services/webPushConfig.js";
@@ -50,6 +51,8 @@ try {
   server = app.listen(PORT, HOST, () => {
     console.log(`Tel-Aqua API running on http://${HOST}:${PORT}`);
     startLogisticsTrackingSync();
+    // Separate Shipway worker; it only starts when SHIPWAY_TRACKING_SYNC_ENABLED=true.
+    startShipwayTrackingSync();
     startCheckoutReminderSync();
     startOrderPushWorker();
   });
@@ -72,6 +75,7 @@ try {
 function shutdown(signal) {
   console.log(`Received ${signal}, shutting down...`);
   stopLogisticsTrackingSync();
+  stopShipwayTrackingSync();
   stopCheckoutReminderSync();
   stopOrderPushWorker();
   if (!server) {

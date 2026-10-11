@@ -239,3 +239,262 @@ export async function findShipwayOrder(orderNumber) {
   shipwayDiagnostics({ orderNumber, httpStatus: response.status, body, error, operation: "reconciliation_ambiguous" });
   throw error;
 }
+
+/* ---------------------------------------------------------------------------
+ * Read-only tracking. Uses GET getorders only; it never books, modifies, or
+ * cancels a Shipway order and never calls v2orders.
+ * ------------------------------------------------------------------------- */
+
+export const SHIPWAY_STATUS_MAP = Object.freeze({
+  SCH: { label: "Shipment Booked", fulfillmentStatus: "shipment_created" },
+  INT: { label: "In Transit", fulfillmentStatus: "in_transit" },
+  OOD: { label: "Out for Delivery", fulfillmentStatus: "out_for_delivery" },
+  DEL: { label: "Delivered", fulfillmentStatus: "delivered" },
+  UND: { label: "Undelivered", fulfillmentStatus: "ndr" },
+  RTO: { label: "Return to Origin", fulfillmentStatus: "rto" },
+  RTD: { label: "Returned", fulfillmentStatus: "returned" },
+  CAN: { label: "Cancelled", fulfillmentStatus: "cancelled" },
+  // No fulfillment equivalent: the label is recorded, fulfillment is left unchanged.
+  ONH: { label: "On Hold", fulfillmentStatus: null },
+});
+
+const LABEL_TO_CODE = new Map(Object.entries(SHIPWAY_STATUS_MAP).map(([code, item]) => [item.label.toLowerCase(), code]));
+
+/** Known codes map to a label + fulfillment status; unknown codes are preserved as-is and never guessed. */
+export function mapShipwayStatus(code, statusText = null) {
+  const raw = String(code ?? "").trim().toUpperCase();
+  const label = String(statusText ?? "").trim();
+  const labelCode = raw ? null : LABEL_TO_CODE.get(label.toLowerCase()) || null;
+  const known = SHIPWAY_STATUS_MAP[raw] || (labelCode && SHIPWAY_STATUS_MAP[labelCode]);
+  if (known) return { code: raw || labelCode, label: known.label, fulfillmentStatus: known.fulfillmentStatus, known: true };
+  return { code: raw || null, label: label || raw || null, fulfillmentStatus: null, known: false };
+}
+
+const SENSITIVE_TRACKING_KEY = /email|phone|mobile|address|authorization|license|password|customer|consignee|first_?name|last_?name|full_?name|billing|zip_?code|pin_?code|^name$/i;
+
+/** Strip personal data before a Shipway body is stored or logged. */
+export function redactShipwayTrackingBody(value, depth = 0) {
+  if (depth > 8) return null;
+  if (Array.isArray(value)) return value.map((item) => redactShipwayTrackingBody(item, depth + 1));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, SENSITIVE_TRACKING_KEY.test(key) ? "[redacted]" : redactShipwayTrackingBody(item, depth + 1)]));
+  }
+  return value;
+}
+
+const textOf = (value, max = 255) => {
+  if (value == null || typeof value === "object") return null;
+  const result = String(value).replace(/\s+/g, " ").trim();
+  return result ? result.slice(0, max) : null;
+};
+const firstText = (source, keys, max) => {
+  for (const key of keys) {
+    const found = textOf(source?.[key], max);
+    if (found) return found;
+  }
+  return null;
+};
+const pad = (n) => String(n).padStart(2, "0");
+
+/**
+ * Normalise a Shipway timestamp to "YYYY-MM-DD HH:MM:SS". Zone-less wall-clock
+ * values are kept as sent (no timezone shift); unparseable values become null.
+ */
+export function normalizeShipwayTime(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    const date = new Date(value < 1e12 ? value * 1000 : value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 19).replace("T", " ");
+  }
+  const raw = String(value).trim();
+  let match = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (match) return `${match[1]}-${match[2]}-${match[3]} ${match[4] || "00"}:${match[5] || "00"}:${match[6] || "00"}`;
+  match = raw.match(/^(\d{2})[-/](\d{2})[-/](\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (match) return `${match[3]}-${match[2]}-${match[1]} ${match[4] || "00"}:${match[5] || "00"}:${match[6] || "00"}`;
+  if (/^\d{10,13}$/.test(raw)) return normalizeShipwayTime(Number(raw));
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return null;
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
+}
+
+const CODE_LIKE = /^[A-Z][A-Z0-9_]{1,7}$/;
+const codeOf = (source, keys) => {
+  for (const key of keys) {
+    const value = textOf(source?.[key], 60);
+    if (value && CODE_LIKE.test(value)) return value;
+  }
+  return null;
+};
+const EVENT_LIST_KEYS = ["shipment_status_scan", "scans", "scan", "scan_details", "tracking_history", "track_history", "history", "events", "track_activities", "shipment_track_activities", "shipment_track", "tracking"];
+const NESTED_KEYS = ["shipment_details", "shipment", "tracking_details", "tracking_data", "awb_details"];
+const EVENT_TIME_KEYS = ["datetime", "date_time", "event_time", "scan_time", "scan_datetime", "status_time", "timestamp", "updated_at", "date"];
+
+function parseShipwayEvent(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const statusCode = codeOf(raw, ["status_code", "code", "shipment_status", "status"]);
+  const rawText = firstText(raw, ["status_name", "status_label", "status", "shipment_status_name", "scan_status"], 160);
+  const statusText = rawText && rawText !== statusCode ? rawText : null;
+  const mapped = mapShipwayStatus(statusCode, statusText);
+  let eventTime = null;
+  for (const key of EVENT_TIME_KEYS) if ((eventTime = normalizeShipwayTime(raw[key]))) break;
+  const time = eventTime && eventTime.endsWith("00:00:00") && String(raw.time ?? "").trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (time) eventTime = `${eventTime.slice(0, 10)} ${pad(time[1])}:${time[2]}:${time[3] || "00"}`;
+  const location = firstText(raw, ["location", "scan_location", "city", "place", "current_location"], 255);
+  const activity = firstText(raw, ["activity", "remark", "remarks", "message", "description", "instructions", "details"], 2000);
+  const status = statusText || mapped.label || activity;
+  if (!status) return null;
+  return {
+    status: status.slice(0, 160),
+    statusCode: mapped.code,
+    fulfillmentStatus: mapped.fulfillmentStatus,
+    eventTime,
+    location,
+    activity,
+    raw: redactShipwayTrackingBody(raw),
+  };
+}
+
+/** Defensive parser for one getorders order record. Never throws; missing fields become null. */
+export function parseShipwayTrackingRecord(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  let record = { ...input };
+  for (const key of NESTED_KEYS) {
+    if (input[key] && typeof input[key] === "object" && !Array.isArray(input[key])) record = { ...input[key], ...record };
+  }
+  const statusCode = codeOf(record, ["shipment_status", "shipment_status_code", "current_status_code", "status_code", "current_status", "status"]);
+  const rawText = firstText(record, ["shipment_status_name", "current_status", "status_name", "shipment_status_text", "status_description", "status"], 160);
+  const statusText = rawText && rawText !== statusCode ? rawText : null;
+  const mapped = mapShipwayStatus(statusCode, statusText);
+  let eventsRaw = [];
+  for (const key of EVENT_LIST_KEYS) if (Array.isArray(record[key])) { eventsRaw = record[key]; break; }
+  const events = eventsRaw.map(parseShipwayEvent).filter(Boolean)
+    .sort((a, b) => (a.eventTime || "").localeCompare(b.eventTime || ""));
+  const latestEvent = events.at(-1) || null;
+  let statusAt = null;
+  for (const key of ["shipment_status_time", "status_time", "status_date", "last_status_time", "status_updated_at", "last_update", "updated_at"]) {
+    if ((statusAt = normalizeShipwayTime(record[key]))) break;
+  }
+  const fromEvent = !mapped.code && !mapped.label && latestEvent;
+  const carrierRaw = textOf(record.carrier ?? record.courier, 80);
+  const carrierIsId = carrierRaw != null && /^\d+$/.test(carrierRaw);
+  return {
+    orderId: firstText(record, ["order_id", "orderid", "order_number"], 160),
+    awb: firstText(record, ["awb", "AWB", "awbno", "awb_no", "awb_number", "awb_code", "tracking_number", "order_tracking_number"], 40),
+    carrierId: firstText(record, ["carrier_id", "courier_id"], 80) || (carrierIsId ? carrierRaw : null),
+    carrierName: firstText(record, ["carrier_title", "carrier_name", "courier_name", "courier_title"], 80) || (carrierIsId ? null : carrierRaw),
+    statusCode: fromEvent ? latestEvent.statusCode : mapped.code,
+    statusLabel: fromEvent ? latestEvent.status : mapped.label,
+    fulfillmentStatus: fromEvent ? latestEvent.fulfillmentStatus : mapped.fulfillmentStatus,
+    statusAt: statusAt || latestEvent?.eventTime || null,
+    location: firstText(record, ["current_location", "location", "last_location"], 255) || latestEvent?.location || null,
+    activity: latestEvent?.activity || null,
+    expectedDeliveryDate: normalizeShipwayTime(record.expected_delivery_date ?? record.edd ?? record.etd)?.slice(0, 10) || null,
+    events,
+  };
+}
+
+function orderRecordsOf(body) {
+  if (Array.isArray(body)) return body;
+  if (!body || typeof body !== "object") return null;
+  for (const key of ["message", "orders", "data", "result", "response"]) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === "object") {
+      if (Array.isArray(value.orders)) return value.orders;
+      if (Array.isArray(value.data)) return value.data;
+      return [value];
+    }
+  }
+  return null;
+}
+
+function trackingError(code, message, extra = {}) {
+  return Object.assign(new Error(message), { code, ...extra });
+}
+
+const sameId = (a, b) => a != null && b != null && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+const isPlainObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+/**
+ * Parse a getorders body for one order/AWB.
+ * Returns { state: "found", tracking } | { state: "not_found" }; throws SHIPWAY_TRACKING_* errors.
+ */
+export function parseShipwayTrackingResponse(body, { orderNumber = null, awb = null } = {}) {
+  if (body == null || (isPlainObject(body) && !Object.keys(body).length)) {
+    throw trackingError("SHIPWAY_TRACKING_INVALID_RESPONSE", "Shipway returned an empty tracking response.", { retryable: true });
+  }
+  if (isPlainObject(body) && typeof body.message === "string" && NO_ORDER_PATTERN.test(body.message.trim())) return { state: "not_found" };
+  if (isPlainObject(body) && [0, "0", false].includes(body.success)) {
+    const message = messageOf(body, "Shipway rejected the tracking request.");
+    if (/auth|credential|licen[sc]e|unauthori[sz]ed|forbidden|permission/i.test(message)) {
+      throw trackingError("SHIPWAY_TRACKING_AUTH", "Shipway rejected the tracking credentials.", { retryable: false, stopBatch: true });
+    }
+    throw trackingError("SHIPWAY_TRACKING_INVALID_RESPONSE", `Shipway tracking was not successful: ${message}`, { retryable: true });
+  }
+  const records = orderRecordsOf(body);
+  if (!records) throw trackingError("SHIPWAY_TRACKING_INVALID_RESPONSE", "Shipway returned an unrecognised tracking response.", { retryable: true });
+  if (!records.length) return { state: "not_found" };
+  const parsed = records.map(parseShipwayTrackingRecord).filter(Boolean);
+  if (!parsed.length) throw trackingError("SHIPWAY_TRACKING_INVALID_RESPONSE", "Shipway returned an unrecognised tracking response.", { retryable: true });
+  const tracking = parsed.find((item) => (orderNumber && sameId(item.orderId, orderNumber)) || (awb && sameId(item.awb, awb)))
+    // A single record with no identifiers at all cannot be attributed to another order.
+    || (parsed.length === 1 && !parsed[0].orderId && !parsed[0].awb ? parsed[0] : null);
+  if (!tracking) return { state: "not_found" };
+  if (!tracking.statusCode && !tracking.statusLabel && !tracking.events.length) {
+    throw trackingError("SHIPWAY_TRACKING_INVALID_RESPONSE", "Shipway returned no tracking status or events for this order.", { retryable: true });
+  }
+  return { state: "found", tracking };
+}
+
+/** Log-safe summary of a tracking failure: never URLs, headers, bodies, or customer data. */
+export function safeShipwayTrackingError(error) {
+  return { code: error?.code || null, httpStatus: error?.httpStatus ?? null, retryable: error?.retryable ?? null };
+}
+
+/**
+ * Read-only Shipway tracking lookup by order number and/or AWB (GET getorders).
+ * Throws SHIPWAY_TRACKING_* errors carrying httpStatus / retryable / stopBatch.
+ */
+export async function getShipwayTracking({ orderNumber = null, awb = null } = {}, { timeoutMs = TIMEOUT_MS } = {}) {
+  const order = textOf(orderNumber, 160);
+  const waybill = textOf(awb, 40);
+  if (!order && !waybill) throw trackingError("SHIPWAY_TRACKING_NO_IDENTIFIER", "An order number or AWB is required for Shipway tracking.", { retryable: false });
+  let config;
+  try {
+    config = getShipwayConfig();
+  } catch (error) {
+    throw trackingError("SHIPWAY_CONFIG_ERROR", error.message, { retryable: false, stopBatch: true });
+  }
+  const authorization = Buffer.from(`${config.email}:${config.licenseKey}`, "utf8").toString("base64");
+  const url = new URL(GET_ORDERS_ENDPOINT);
+  // Documented getorders lookup parameters: orderid and awb_number.
+  if (order) url.searchParams.set("orderid", order);
+  else url.searchParams.set("awb_number", waybill);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  let raw;
+  try {
+    response = await fetch(url, { method: "GET", headers: { Authorization: `Basic ${authorization}`, Accept: "application/json" }, signal: controller.signal });
+    raw = await response.text();
+  } catch (cause) {
+    if (cause?.name === "AbortError") throw trackingError("SHIPWAY_TRACKING_TIMEOUT", "Shipway tracking request timed out.", { retryable: true });
+    throw trackingError("SHIPWAY_TRACKING_NETWORK", "Shipway tracking is currently unreachable.", { retryable: true });
+  } finally {
+    clearTimeout(timer);
+  }
+  const status = response.status;
+  if (status === 401 || status === 403) throw trackingError("SHIPWAY_TRACKING_AUTH", `Shipway tracking returned HTTP ${status}.`, { httpStatus: status, retryable: false, stopBatch: true });
+  if (status === 404) return { state: "not_found", httpStatus: status };
+  if (status === 429) throw trackingError("SHIPWAY_TRACKING_RATE_LIMITED", "Shipway tracking is rate limited; retry later.", { httpStatus: status, retryable: true, stopBatch: true });
+  if (!response.ok) throw trackingError("SHIPWAY_TRACKING_UPSTREAM", `Shipway tracking returned HTTP ${status}.`, { httpStatus: status, retryable: status >= 500 });
+  let body;
+  try {
+    body = String(raw ?? "").trim() ? JSON.parse(raw) : null;
+  } catch {
+    throw trackingError("SHIPWAY_TRACKING_INVALID_RESPONSE", "Shipway returned malformed tracking JSON.", { httpStatus: status, retryable: true });
+  }
+  const parsed = parseShipwayTrackingResponse(body, { orderNumber: order, awb: waybill });
+  return { ...parsed, httpStatus: status, body: redactShipwayTrackingBody(body) };
+}
