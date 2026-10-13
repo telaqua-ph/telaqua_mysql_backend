@@ -554,10 +554,13 @@ async function fetchDashboardStats({ adminId, from, to }) {
   return rows[0] || null;
 }
 
-/** The Inventory Sold card uses the two Dashboard paid-order aggregates. */
-export async function getInventorySoldOrderCount(adminId) {
-  const stats = await fetchDashboardStats({ adminId, from: null, to: null });
-  return Number(stats?.razorpay_paid_orders || 0) + Number(stats?.cod_paid_orders || 0);
+/**
+ * The Inventory Sold card mirrors Revenue's "All-time Devices Sold":
+ * the quantity of eligible paid devices, not the number of paid orders.
+ */
+export async function getInventoryDevicesSold(adminId, fetchStats = fetchDashboardStats) {
+  const stats = await fetchStats({ adminId, from: null, to: null });
+  return Number(stats?.devices_sold || 0);
 }
 
 export async function getStats(req, res) {
