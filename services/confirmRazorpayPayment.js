@@ -12,6 +12,7 @@ import {
 import { getRazorpayClient } from "../config/razorpay.js";
 import { incrementPromoUsedCount } from "./promoService.js";
 import { processOrderFulfillment } from "./invoiceService.js";
+import { triggerInvoiceLinkWhatsAppAsync } from "./invoiceWhatsAppService.js";
 import {
   deductStockForSale,
   dispatchInventoryAlertEmails,
@@ -42,12 +43,17 @@ export function logPaymentEvent(code, extra = {}) {
 
 export function triggerOrderFulfillmentAsync(orderId) {
   if (!orderId) return;
-  processOrderFulfillment(orderId).catch((err) => {
-    console.error("Order fulfillment failed:", {
-      orderId,
-      message: err?.message || String(err),
+  processOrderFulfillment(orderId)
+    .catch((err) => {
+      console.error("Order fulfillment failed:", {
+        orderId,
+        message: err?.message || String(err),
+      });
+    })
+    .finally(() => {
+      // MyOperator WhatsApp invoice link; runs after invoice generation and never throws.
+      triggerInvoiceLinkWhatsAppAsync(orderId);
     });
-  });
 }
 
 function orderSelectSql(includeTestAndFinal) {
