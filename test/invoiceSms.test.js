@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildSmsInvoiceLink,
   buildSmsVariablesValues,
   generateSmsInvoiceToken,
   hashSmsInvoiceToken,
@@ -56,9 +57,20 @@ test("variables_values follow template order and DLT rules", () => {
     order_number: "TAQ-001078",
     final_total: "1799.00",
   };
+  const link = buildSmsInvoiceLink(
+    "https://lightpink-reindeer-561421.hostingersite.com/",
+    "1078-k3Jf9xQa2LmPzZ"
+  );
+  assert.equal(link, "https://lightpink-reindeer-561421.hostingersite.com/i/?1078-k3Jf9xQa2LmPzZ");
+  // Default "ref" mode: template already holds https://<backend>/i/? — send only the ref.
   assert.equal(
     buildSmsVariablesValues(order, "1078-k3Jf9xQa2LmPzZ"),
     "Tadana|TAQ-001078|1799|1078-k3Jf9xQa2LmPzZ"
+  );
+  // "url" mode: full link is never truncated.
+  assert.equal(
+    buildSmsVariablesValues(order, link),
+    `Tadana|TAQ-001078|1799|${link}`
   );
   assert.equal(
     buildSmsVariablesValues({ id: 5, customer_name: "A|B", total_amount: 10.5 }, "5-x", ["name", "amount", "link"]),
@@ -74,4 +86,11 @@ test("Fast2SMS is configured only with API key, sender ID and message ID", () =>
   assert.equal(isFast2SmsConfigured({ apiKey: "k", senderId: "TELAQA", messageId: "123" }), true);
   assert.equal(isFast2SmsConfigured({ apiKey: "", senderId: "TELAQA", messageId: "123" }), false);
   assert.equal(isFast2SmsConfigured({ apiKey: "k", senderId: "TELAQA", messageId: "" }), false);
+});
+
+test("refFromQueryString reads /i/?<ref> links", async () => {
+  const { refFromQueryString } = await import("../routes/invoiceLink.js");
+  assert.equal(refFromQueryString("/i/?1078-k3Jf9xQa2LmPzZ"), "1078-k3Jf9xQa2LmPzZ");
+  assert.equal(refFromQueryString("/i/?1078-k3Jf9xQa2LmPzZ&utm=sms"), "1078-k3Jf9xQa2LmPzZ");
+  assert.equal(refFromQueryString("/i/"), "");
 });

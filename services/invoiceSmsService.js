@@ -4,8 +4,13 @@
  * After an order is confirmed (COD or prepaid), send the approved Fast2SMS DLT
  * template with a per-order invoice link:
  *
- *   DLT template : "... Download your invoice: https://<backend>/i/{#var#} ..."
- *   Link value   : "<orderId>-<14 char alphanumeric token>"   (<= 30 chars, DLT limit)
+ *   FAST2SMS_INVOICE_LINK_MODE=ref (default) — matches the DLT template
+ *     "... Download invoice: https://<backend>/i/?{#var#}"
+ *     and sends only "<orderId>-<14 char token>" as the last variable.
+ *     Customer link: https://<backend>/i/?1078-k3Jf9xQa2LmPzZ
+ *   FAST2SMS_INVOICE_LINK_MODE=url — for a template "... Download invoice: {#var#}"
+ *     and sends the full "https://<backend>/i/?<orderId>-<token>" as the last variable.
+ *   Both forms (/i/?<ref> and /i/<ref>) are served by routes/invoiceLink.js.
  *
  * Only the SHA-256 hash of the token is stored (orders.sms_invoice_token_hash).
  * This token is separate from the WhatsApp token (whatsapp_invoice_token_hash) so
@@ -24,6 +29,7 @@ const TOKEN_LENGTH = 14;
 const TOKEN_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const DLT_VAR_MAX = 30;
 const DEFAULT_VARIABLES = "name,order_number,amount,link";
+const DEFAULT_LINK_BASE = "https://lightpink-reindeer-561421.hostingersite.com";
 let columnsReady = false;
 
 /* ------------------------------------------------------------------ tokens */
@@ -69,6 +75,15 @@ export function getFast2SmsConfig() {
     apiKey: String(process.env.FAST2SMS_API_KEY || "").trim(),
     senderId: String(process.env.FAST2SMS_SENDER_ID || "").trim(),
     messageId: String(process.env.FAST2SMS_INVOICE_MESSAGE_ID || "").trim(),
+    // Must match the whitelisted DLT CTA domain (https://<backend>/i/?).
+    linkBase: String(
+      process.env.FAST2SMS_INVOICE_LINK_BASE ||
+      process.env.BACKEND_BASE_URL ||
+      DEFAULT_LINK_BASE
+    ).trim().replace(/\/+$/, ""),
+    linkMode: String(process.env.FAST2SMS_INVOICE_LINK_MODE || "ref").trim().toLowerCase() === "url"
+      ? "url"
+      : "ref",
     variables: String(process.env.FAST2SMS_INVOICE_VARIABLES || DEFAULT_VARIABLES)
       .split(",")
       .map((v) => v.trim().toLowerCase())
@@ -89,30 +104,39 @@ function formatAmount(raw) {
   return n.toFixed(2);
 }
 
-/** DLT variables: no pipe (Fast2SMS separator), single line, max 30 chars. */
-function cleanVar(value) {
+/** DLT variables: no pipe (Fast2SMS separator), single line, max 30 chars for text. */
+function cleanVar(value, maxLength = DLT_VAR_MAX) {
   return String(value ?? "")
     .replace(/[|\r\n\t]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, DLT_VAR_MAX)
+    .slice(0, maxLength)
     .trim();
+}
+
+/** Full invoice URL sent in the URL-tagged DLT variable. */
+export function buildSmsInvoiceLink(linkBase, linkRef) {
+  return `${String(linkBase || DEFAULT_LINK_BASE).replace(/\/+$/, "")}/i/?${linkRef}`;
 }
 
 /**
  * Build Fast2SMS variables_values in template order.
  * Supported names: name, order_number, amount, link.
  */
-export function buildSmsVariablesValues(order, linkRef, variables = DEFAULT_VARIABLES.split(",")) {
+export function buildSmsVariablesValues(order, linkValue, variables = DEFAULT_VARIABLES.split(",")) {
   const firstName = String(order.customer_name || "").trim().split(/\s+/)[0];
   const values = {
     name: firstName || "Customer",
     order_number: String(order.order_number || order.id || ""),
     amount: formatAmount(order.final_total ?? order.total_amount),
-    link: linkRef,
+    link: linkValue,
   };
   return variables
-    .map((key) => cleanVar(Object.prototype.hasOwnProperty.call(values, key) ? values[key] : ""))
+    .map((key) => {
+      const value = Object.prototype.hasOwnProperty.call(values, key) ? values[key] : "";
+      // The URL variable must never be cut short.
+      return key === "link" ? cleanVar(value, 500) : cleanVar(value);
+    })
     .join("|");
 }
 
@@ -219,7 +243,11 @@ export async function sendInvoiceLinkSms(orderId, { force = false } = {}) {
 
   const token = generateSmsInvoiceToken();
   const linkRef = `${id}-${token}`;
-  if (linkRef.length > DLT_VAR_MAX) return { skipped: true, reason: "link_too_long" };
+  let linkValue = linkRef;
+  if (config.linkMode === "url") {
+    linkValue = buildSmsInvoiceLink(config.linkBase, linkRef);
+    if (!/^https?:\/\//i.test(linkValue)) return { skipped: true, reason: "invalid_link_base" };
+  }
 
   // Claim: only one sender wins (verify-payment and the Razorpay webhook can both fire).
   const claim = await query(
@@ -235,7 +263,7 @@ export async function sendInvoiceLinkSms(orderId, { force = false } = {}) {
     const result = await sendFast2SmsDlt({
       config,
       phoneNumber: phone.phoneNumber,
-      variablesValues: buildSmsVariablesValues(order, linkRef, config.variables),
+      variablesValues: buildSmsVariablesValues(order, linkValue, config.variables),
     });
     await updateSmsStatus(id, {
       sms_invoice_status: "sent",

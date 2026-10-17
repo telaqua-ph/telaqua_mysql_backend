@@ -5,8 +5,8 @@
  *   GET /i/<orderId>-<token>
  * The token is checked against orders.whatsapp_invoice_token_hash.
  *
- * Fast2SMS invoice SMS (DLT template URL https://<backend>/i/{#var#}):
- *   GET /i/<orderId>-<14 char token>
+ * Fast2SMS invoice SMS (DLT template URL https://<backend>/i/?{#var#}):
+ *   GET /i/?<orderId>-<14 char token>   (also accepted: /i/<orderId>-<token>)
  * The token is checked against orders.sms_invoice_token_hash.
  */
 
@@ -37,10 +37,27 @@ function messagePage(message) {
 <h3>${message}</h3></body></html>`;
 }
 
-router.get("/:ref", async (req, res) => {
+/** "/i/?1078-abc..." → "1078-abc..." (first raw query key, no "=value"). */
+export function refFromQueryString(originalUrl) {
+  const query = String(originalUrl || "").split("?")[1] || "";
+  const first = query.split("&")[0].split("=")[0];
+  try {
+    return decodeURIComponent(first).trim();
+  } catch {
+    return "";
+  }
+}
+
+// SMS link form: /i/?<orderId>-<token>
+router.get("/", (req, res) => serveInvoiceRef(refFromQueryString(req.originalUrl), res));
+
+// WhatsApp link form (and SMS fallback): /i/<orderId>-<token>
+router.get("/:ref", (req, res) => serveInvoiceRef(req.params.ref, res));
+
+async function serveInvoiceRef(ref, res) {
   res.setHeader("Cache-Control", "private, no-store");
-  const whatsappRef = parseInvoiceLinkRef(req.params.ref);
-  const smsRef = whatsappRef ? null : parseSmsInvoiceLinkRef(req.params.ref);
+  const whatsappRef = parseInvoiceLinkRef(ref);
+  const smsRef = whatsappRef ? null : parseSmsInvoiceLinkRef(ref);
   const parsed = whatsappRef || smsRef;
   if (!parsed) {
     return res.status(404).type("html").send(messagePage("This invoice link is invalid."));
@@ -101,6 +118,6 @@ router.get("/:ref", async (req, res) => {
       .type("html")
       .send(messagePage("We could not load your invoice right now. Please try again later."));
   }
-});
+}
 
 export default router;
