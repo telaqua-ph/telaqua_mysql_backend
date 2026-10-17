@@ -4,6 +4,10 @@
  * Public customer invoice link sent on WhatsApp (MyOperator template button):
  *   GET /i/<orderId>-<token>
  * The token is checked against orders.whatsapp_invoice_token_hash.
+ *
+ * Fast2SMS invoice SMS (DLT template URL https://<backend>/i/{#var#}):
+ *   GET /i/<orderId>-<14 char token>
+ * The token is checked against orders.sms_invoice_token_hash.
  */
 
 import { Router } from "express";
@@ -17,6 +21,11 @@ import {
   isValidInvoiceLinkToken,
   parseInvoiceLinkRef,
 } from "../services/invoiceWhatsAppService.js";
+import {
+  ensureSmsInvoiceColumns,
+  isValidSmsInvoiceToken,
+  parseSmsInvoiceLinkRef,
+} from "../services/invoiceSmsService.js";
 
 const router = Router();
 
@@ -30,18 +39,33 @@ function messagePage(message) {
 
 router.get("/:ref", async (req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
-  const parsed = parseInvoiceLinkRef(req.params.ref);
+  const whatsappRef = parseInvoiceLinkRef(req.params.ref);
+  const smsRef = whatsappRef ? null : parseSmsInvoiceLinkRef(req.params.ref);
+  const parsed = whatsappRef || smsRef;
   if (!parsed) {
     return res.status(404).type("html").send(messagePage("This invoice link is invalid."));
   }
 
   try {
-    await ensureInvoiceLinkTokenColumn();
-    const { rows } = await query(
-      `SELECT whatsapp_invoice_token_hash FROM orders WHERE id = ? LIMIT 1`,
-      [parsed.orderId]
-    );
-    if (!rows.length || !isValidInvoiceLinkToken(rows[0].whatsapp_invoice_token_hash, parsed.token)) {
+    let valid = false;
+    if (whatsappRef) {
+      await ensureInvoiceLinkTokenColumn();
+      const { rows } = await query(
+        `SELECT whatsapp_invoice_token_hash FROM orders WHERE id = ? LIMIT 1`,
+        [parsed.orderId]
+      );
+      valid = rows.length > 0 &&
+        isValidInvoiceLinkToken(rows[0].whatsapp_invoice_token_hash, parsed.token);
+    } else {
+      await ensureSmsInvoiceColumns();
+      const { rows } = await query(
+        `SELECT sms_invoice_token_hash FROM orders WHERE id = ? LIMIT 1`,
+        [parsed.orderId]
+      );
+      valid = rows.length > 0 &&
+        isValidSmsInvoiceToken(rows[0].sms_invoice_token_hash, parsed.token);
+    }
+    if (!valid) {
       return res
         .status(404)
         .type("html")

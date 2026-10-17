@@ -13,6 +13,7 @@ import { getRazorpayClient } from "../config/razorpay.js";
 import { incrementPromoUsedCount } from "./promoService.js";
 import { processOrderFulfillment } from "./invoiceService.js";
 import { triggerInvoiceLinkWhatsAppAsync } from "./invoiceWhatsAppService.js";
+import { triggerInvoiceLinkSmsAsync } from "./invoiceSmsService.js";
 import {
   deductStockForSale,
   dispatchInventoryAlertEmails,
@@ -53,6 +54,8 @@ export function triggerOrderFulfillmentAsync(orderId) {
     .finally(() => {
       // MyOperator WhatsApp invoice link; runs after invoice generation and never throws.
       triggerInvoiceLinkWhatsAppAsync(orderId);
+      // Fast2SMS invoice link SMS (COD + prepaid); never throws.
+      triggerInvoiceLinkSmsAsync(orderId);
     });
 }
 

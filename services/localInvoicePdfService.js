@@ -74,8 +74,14 @@ export async function generateLocalInvoicePdf(order) {
     : "This fallback copy was generated from the order snapshot. Payment is pending.";
 
   doc.rect(0, 0, 595.28, 112).fill("#063970");
-  doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(25)
-    .text(businessName, 45, 34, { width: 300 });
+  // Shrink long business names so they stay on one line above the tagline.
+  doc.font("Helvetica-Bold");
+  let nameSize = 25;
+  while (nameSize > 14 && doc.fontSize(nameSize).widthOfString(businessName) > 320) {
+    nameSize -= 1;
+  }
+  doc.fillColor("#FFFFFF").fontSize(nameSize)
+    .text(businessName, 45, 34, { width: 320, lineBreak: false, ellipsis: true });
   doc.font("Helvetica").fontSize(10).text("Water-quality instruments", 45, 67);
   doc.font("Helvetica-Bold").fontSize(20).text("INVOICE", 380, 34, {
     width: 170, align: "right",
@@ -86,11 +92,12 @@ export async function generateLocalInvoicePdf(order) {
 
   doc.fillColor("#14213D").font("Helvetica-Bold").fontSize(10)
     .text("BILLED TO", 45, 138);
+  // Each line starts below the previous one so wrapped addresses never overlap.
   doc.font("Helvetica").fontSize(10)
-    .text(String(order.customer_name || "Customer"), 45, 157)
-    .text(String(order.address || ""), 45, 173, { width: 255 })
-    .text([order.city, order.state, order.pincode].filter(Boolean).join(", "), 45, 189, { width: 255 })
-    .text(String(resolveOrderEmail(order.email, order.phone) || ""), 45, 205, { width: 255 });
+    .text(String(order.customer_name || "Customer"), 45, 157, { width: 280 });
+  doc.text(String(order.address || ""), 45, doc.y + 2, { width: 280 });
+  doc.text([order.city, order.state, order.pincode].filter(Boolean).join(", "), 45, doc.y + 2, { width: 280 });
+  doc.text(String(resolveOrderEmail(order.email, order.phone) || ""), 45, doc.y + 2, { width: 280 });
 
   cell(doc, "Invoice date", 355, 140, 90, { bold: true });
   cell(doc, date(order.payment_date || order.invoice_generated_at), 445, 140, 105, { align: "right" });
