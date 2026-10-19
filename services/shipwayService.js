@@ -60,6 +60,20 @@ export function assertShipwayBookingSucceeded(body, context = {}) {
     };
   }
   let safeMessage = messageOf(body, "Shipway did not confirm both order booking and AWB label generation.");
+  // Shipway often accepts the order first ("Order has been added successfully") and assigns the
+  // courier/AWB a few seconds later. Say so plainly and surface the courier (awb_response) reason.
+  const orderCreated = isTruthyFlag(body?.success) && !awb;
+  if (orderCreated && !isShipwayNoCourierResponse(body)) {
+    const awbText = typeof body?.awb_response === "string"
+      ? body.awb_response
+      : awbResponse.message || awbResponse.error || "";
+    const shipwayText = /added successfully/i.test(safeMessage) ? "" : safeMessage;
+    const courierReason = [shipwayText, String(awbText || "").replace(/[\r\n]+/g, " ").trim().slice(0, 300)]
+      .filter(Boolean).join("; ");
+    safeMessage = `${context.orderNumber ? `Order ${context.orderNumber}` : "The order"} was created in Shipway, but the courier/AWB was not assigned yet` +
+      (courierReason ? ` (${courierReason})` : "") +
+      ". Do not book it again in Shipway. Press Retry in a minute: it fetches the AWB from Shipway without booking twice.";
+  }
   if (isShipwayNoCourierResponse(body)) {
     const courierText = typeof body?.awb_response === "string" ? messageOf({ message: body.awb_response }, "") : "";
     safeMessage = [safeMessage, courierText && courierText !== safeMessage ? courierText : ""].filter(Boolean).join(" ") +
@@ -69,6 +83,7 @@ export function assertShipwayBookingSucceeded(body, context = {}) {
   const error = new Error(`Shipway: ${safeMessage}`);
   error.code = "SHIPWAY_PARTIAL_OR_REJECTED";
   error.upstreamBody = body || null;
+  if (orderCreated) error.shipwayOrderCreated = true;
   if (isShipwayNoCourierResponse(body)) error.noCourier = true;
   throw error;
 }
@@ -192,13 +207,13 @@ export async function resolveShipwayCarrier() {
 }
 
 /** Read-only reconciliation. It never creates, modifies, or cancels a Shipway order. */
-export async function findShipwayOrder(orderNumber) {
+export async function findShipwayOrder(orderNumber, { timeoutMs = TIMEOUT_MS } = {}) {
   const config = getShipwayConfig();
   const authorization = Buffer.from(`${config.email}:${config.licenseKey}`, "utf8").toString("base64");
   const url = new URL(GET_ORDERS_ENDPOINT);
   url.searchParams.set("orderid", orderNumber);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   try {
     response = await fetch(url, { headers: { Authorization: `Basic ${authorization}`, Accept: "application/json" }, signal: controller.signal });

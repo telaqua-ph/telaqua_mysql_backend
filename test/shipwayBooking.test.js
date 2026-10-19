@@ -154,3 +154,17 @@ test("Shipway lookup confirms absence before a retry can be enabled", async () =
   assert.equal(found.state, "confirmed_absent");
   globalThis.fetch = prior;
 });
+
+test("Shipway order created without AWB is flagged so the late AWB can be fetched", () => {
+  assert.throws(
+    () => assertShipwayBookingSucceeded(
+      { success: 1, message: "Order has been added successfully", awb_response: { success: false, message: "AWB assignment in progress" } },
+      { orderNumber: "TAQ-001115" }
+    ),
+    (error) => error.code === "SHIPWAY_PARTIAL_OR_REJECTED" &&
+      error.shipwayOrderCreated === true &&
+      /TAQ-001115 was created in Shipway/.test(error.message) &&
+      /AWB assignment in progress/.test(error.message) &&
+      !/added successfully/.test(error.message)
+  );
+});

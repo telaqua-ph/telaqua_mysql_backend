@@ -599,6 +599,23 @@ export async function reconcileOrderShipment(req, res) {
   }
 }
 
+const LATE_AWB_DELAYS_MS = [3000, 5000];
+
+/** Read-only: poll Shipway briefly for an AWB assigned just after the order was created. */
+async function fetchLateShipwayAwb(order) {
+  for (const delay of LATE_AWB_DELAYS_MS) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      const lookup = await findShipwayOrder(shipwayOrderNumber(order), { timeoutMs: 8000 });
+      if (hasShipwayArtifacts(lookup)) return lookup;
+    } catch (error) {
+      console.warn("[Shipway] Late AWB lookup failed", { order: shipwayOrderNumber(order), message: error?.message });
+      return null;
+    }
+  }
+  return null;
+}
+
 export async function createOrderShipment(req, res) {
   const orderId = idOf(req.params.orderId || req.body?.order_id || req.body?.orderId);
   if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
@@ -685,6 +702,19 @@ export async function createOrderShipment(req, res) {
     await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl }, pool);
     return res.status(201).json({ success: true, message: "Shipment is Ready to Ship.", shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, data });
   } catch (error) {
+    // Shipway created the order but assigns the courier/AWB a few seconds later.
+    // Look it up (read-only, never books) and save the AWB + label if it is ready now.
+    if (error?.shipwayOrderCreated) {
+      const late = await fetchLateShipwayAwb(order);
+      if (late) {
+        try {
+          const result = await saveExistingShipwayBooking(order, shipment, late, token, req);
+          if (result.success) return res.status(201).json({ ...result, message: "Shipment is Ready to Ship." });
+        } catch (saveError) {
+          console.warn("[Shipway] Could not save late AWB", { orderId, message: saveError?.message });
+        }
+      }
+    }
     // Explicit Shipway rejection without an AWB/label is safe to retry. Timeouts and
     // ambiguous partial responses remain locked for read-only reconciliation.
     if (isDefinitiveShipwayBookingRejection(error)) {
