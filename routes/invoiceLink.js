@@ -48,8 +48,30 @@ export function refFromQueryString(originalUrl) {
   }
 }
 
+// Shown when the base link (/i/ or /i/?) is opened without an invoice code,
+// e.g. by DLT/SMS reviewers checking the whitelisted URL.
+const INVOICE_INFO_PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tel-Aqua Invoice Download</title></head>
+<body style="font-family:Arial,sans-serif;margin:0;color:#14213D;background:#F5F8FB">
+<div style="background:#063970;color:#fff;padding:32px 20px;text-align:center">
+<h1 style="margin:0;font-size:26px">Tel-Aqua Invoice Download</h1>
+<p style="margin:8px 0 0">AQUA AI PRIVATE LIMITED &middot; Water-quality instruments</p></div>
+<div style="max-width:560px;margin:32px auto;padding:0 20px;line-height:1.6">
+<p>After an order is placed on telaqua.in, the customer receives an SMS with a personal link to download the invoice for that order.</p>
+<p>Each link contains a unique, secure code and opens only that customer's own invoice.</p>
+<p><a href="https://telaqua.in" style="display:inline-block;background:#063970;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none">Visit telaqua.in</a></p>
+</div></body></html>`;
+
 // SMS link form: /i/?<orderId>-<token>
-router.get("/", (req, res) => serveInvoiceRef(refFromQueryString(req.originalUrl), res));
+router.get("/", (req, res) => {
+  const ref = refFromQueryString(req.originalUrl);
+  if (!ref) {
+    res.setHeader("Cache-Control", "public, max-age=300");
+    return res.status(200).type("html").send(INVOICE_INFO_PAGE);
+  }
+  return serveInvoiceRef(ref, res);
+});
 
 // WhatsApp link form (and SMS fallback): /i/<orderId>-<token>
 router.get("/:ref", (req, res) => serveInvoiceRef(req.params.ref, res));
