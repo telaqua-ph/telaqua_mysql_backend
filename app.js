@@ -128,8 +128,26 @@ app.use(
 );
 
 // Health checks — must not depend on DB, Razorpay, or Delhivery
+// Home page: browsers (e.g. DLT/SMS reviewers opening the domain) get a readable business page;
+// API clients and uptime checks that ask for JSON still get the JSON status.
+const HOME_PAGE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tel-Aqua by AQUA AI PRIVATE LIMITED</title></head>
+<body style="font-family:Arial,sans-serif;margin:0;color:#14213D;background:#F5F8FB">
+<div style="background:#063970;color:#fff;padding:32px 20px;text-align:center">
+<h1 style="margin:0;font-size:26px">Tel-Aqua</h1>
+<p style="margin:8px 0 0">AQUA AI PRIVATE LIMITED &middot; Water-quality instruments</p></div>
+<div style="max-width:560px;margin:32px auto;padding:0 20px;line-height:1.6">
+<p>This is the official order and invoice service of Tel-Aqua (AQUA AI PRIVATE LIMITED).</p>
+<p>Customers receive a secure link to download the invoice for their own order after it is placed on our website.</p>
+<p><a href="https://telaqua.in" style="display:inline-block;background:#063970;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none">Visit telaqua.in</a></p>
+</div></body></html>`;
+
 app.get("/", (req, res) => {
-  res.status(200).json({
+  if (req.accepts(["json", "html"]) === "html") {
+    return res.status(200).type("html").send(HOME_PAGE_HTML);
+  }
+  return res.status(200).json({
     success: true,
     message: "Tel-Aqua API is running",
   });
