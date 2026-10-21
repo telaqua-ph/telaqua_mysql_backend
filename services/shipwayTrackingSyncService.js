@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import { pool } from "../config/db.js";
 import { canAdvanceFulfillment } from "./logisticsState.js";
 import { isShipwayShipment } from "./shipmentProvider.js";
-import { getShipwayTracking, safeShipwayTrackingError } from "./shipwayService.js";
+import { findShipwayOrder, getShipwayTracking, isHttpUrl, safeShipwayTrackingError } from "./shipwayService.js";
 
 const DEFAULT_MINUTES = 30;
 const MIN_MINUTES = 5;
@@ -25,6 +25,10 @@ const SHIPWAY_ONLY_SQL = "LOWER(TRIM(s.provider)) = 'shipway'";
 let timer = null;
 let startupTimer = null;
 let running = false;
+let pendingTimer = null;
+let pendingRunning = false;
+
+const DEFAULT_PENDING_MINUTES = 5;
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -247,6 +251,90 @@ export async function runShipwayTrackingSync({ db = pool, fetchTracking = getShi
   return summary;
 }
 
+/**
+ * Pending-AWB pass (read-only toward Shipway: GET getorders only, never v2orders).
+ * A Shipway shipment without an AWB (e.g. "Booking Failed" because the first courier
+ * refused the pincode) is looked up again. When the admin has assigned/re-assigned a
+ * courier in Shipway, the AWB, courier and label are saved and the order becomes
+ * Ready to Ship, so the admin dashboard stops showing "Booking Failed".
+ */
+export async function runShipwayPendingAwbSync({ db = pool, lookup = findShipwayOrder, env = process.env, sleepFn = sleep } = {}) {
+  if (pendingRunning) return { skipped: true, reason: "already_running" };
+  pendingRunning = true;
+  const summary = { skipped: false, checked: 0, saved: 0, failed: 0 };
+  try {
+    const { batch, paceMs } = shipwayTrackingSyncSettings(env);
+    const { rows } = await db.query(
+      `SELECT s.*, o.order_number AS shipway_order_number
+       FROM shipments s
+       JOIN orders o ON o.id = s.order_id
+       WHERE ${SHIPWAY_ONLY_SQL}
+         AND s.waybill_number IS NULL
+         AND (s.processing_token IS NULL OR s.processing_started_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE))
+         AND COALESCE(s.fulfillment_status, 'unfulfilled') COLLATE utf8mb4_unicode_ci NOT IN (
+           'delivered' COLLATE utf8mb4_unicode_ci,
+           'cancelled' COLLATE utf8mb4_unicode_ci,
+           'returned' COLLATE utf8mb4_unicode_ci
+         )
+         AND s.created_at > DATE_SUB(NOW(), INTERVAL 30 DAY)
+         AND (s.last_tracking_update IS NULL OR s.last_tracking_update < DATE_SUB(NOW(), INTERVAL 5 MINUTE))
+       ORDER BY COALESCE(s.last_tracking_update, s.created_at) ASC
+       LIMIT ${batch}`
+    );
+    const shipments = rows.filter(isShipwayShipment);
+    for (let i = 0; i < shipments.length; i += 1) {
+      const shipment = shipments[i];
+      summary.checked += 1;
+      try {
+        const orderNumber = await orderNumberFor(shipment, db);
+        const found = orderNumber ? await lookup(orderNumber, { timeoutMs: 10_000 }) : null;
+        const awb = found?.state === "exists" ? String(found.awb || "").trim() : "";
+        if (awb) {
+          const labelUrl = isHttpUrl(found.labelUrl) ? found.labelUrl : null;
+          const saved = await db.query(
+            `UPDATE shipments SET provider = 'Shipway', waybill_number = ?,
+               courier_name = COALESCE(?, courier_name, 'Shipway'), carrier_id = COALESCE(?, carrier_id),
+               fulfillment_status = 'ready_to_ship', shipment_status = 'Ready to Ship',
+               shipment_created_at = COALESCE(shipment_created_at, NOW()),
+               shipping_label_url = COALESCE(?, shipping_label_url),
+               label_status = CASE WHEN ? IS NULL THEN label_status ELSE 'Generated' END,
+               label_generated_at = CASE WHEN ? IS NULL THEN label_generated_at ELSE COALESCE(label_generated_at, NOW()) END,
+               shipment_response = ?, processing_token = NULL, processing_started_at = NULL,
+               last_error = NULL, last_tracking_update = NOW()
+             WHERE id = ? AND waybill_number IS NULL AND LOWER(TRIM(provider)) = 'shipway'
+               AND (processing_token IS NULL OR processing_started_at < DATE_SUB(NOW(), INTERVAL 10 MINUTE))`,
+            [awb, found.carrierName || null, found.carrierId || null, labelUrl, labelUrl, labelUrl, asJson(found.body ?? null), shipment.id]
+          );
+          if (saved.rowCount === 1) {
+            summary.saved += 1;
+            await db.query("UPDATE orders SET fulfillment_status = 'ready_to_ship' WHERE id = ?", [shipment.order_id]);
+            await db.query(
+              "INSERT INTO shipment_audit_log (shipment_id, admin_id, action, before_data, after_data) VALUES (?, ?, ?, ?, ?)",
+              [shipment.id, null, "shipway_awb_synced", asJson({ shipment_status: shipment.shipment_status || null }), asJson({ waybill: awb, carrierName: found.carrierName || null, labelUrl })]
+            );
+            console.log("Shipway AWB synced for pending shipment", { shipmentId: shipment.id, orderNumber });
+          }
+        } else {
+          // No courier assigned yet in Shipway: check again on a later run.
+          await db.query("UPDATE shipments SET last_tracking_update = NOW() WHERE id = ? AND waybill_number IS NULL", [shipment.id]);
+        }
+      } catch (error) {
+        summary.failed += 1;
+        await db.query("UPDATE shipments SET last_tracking_update = NOW() WHERE id = ? AND waybill_number IS NULL", [shipment.id]).catch(() => {});
+        console.warn("Shipway pending AWB check failed", { shipmentId: shipment.id, message: String(error?.message || "").slice(0, 200) });
+      }
+      if (i < shipments.length - 1 && paceMs > 0) await sleepFn(paceMs);
+    }
+    if (summary.checked) console.log("Shipway pending AWB sync processed", { ...summary });
+  } catch (error) {
+    console.error("Shipway pending AWB sync failed", { code: error?.code || null, message: String(error?.message || "").slice(0, 200) });
+    summary.error = error?.code || "SYNC_FAILED";
+  } finally {
+    pendingRunning = false;
+  }
+  return summary;
+}
+
 export function startShipwayTrackingSync(env = process.env) {
   if (!isShipwayTrackingSyncEnabled(env)) return null;
   if (timer) return timer;
@@ -255,13 +343,19 @@ export function startShipwayTrackingSync(env = process.env) {
   timer.unref?.();
   startupTimer = setTimeout(() => { runShipwayTrackingSync(); }, 15_000);
   startupTimer.unref?.();
-  console.log("Shipway tracking sync started", { minutes });
+  const pendingMinutes = Number(env.SHIPWAY_PENDING_AWB_SYNC_MINUTES);
+  const everyMinutes = Number.isFinite(pendingMinutes) && pendingMinutes > 0 ? Math.max(2, Math.floor(pendingMinutes)) : DEFAULT_PENDING_MINUTES;
+  pendingTimer = setInterval(() => { runShipwayPendingAwbSync(); }, everyMinutes * 60 * 1000);
+  pendingTimer.unref?.();
+  console.log("Shipway tracking sync started", { minutes, pendingAwbMinutes: everyMinutes });
   return timer;
 }
 
 export function stopShipwayTrackingSync() {
   if (timer) clearInterval(timer);
   if (startupTimer) clearTimeout(startupTimer);
+  if (pendingTimer) clearInterval(pendingTimer);
   timer = null;
   startupTimer = null;
+  pendingTimer = null;
 }

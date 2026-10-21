@@ -72,7 +72,9 @@ export function assertShipwayBookingSucceeded(body, context = {}) {
       .filter(Boolean).join("; ");
     safeMessage = `${context.orderNumber ? `Order ${context.orderNumber}` : "The order"} was created in Shipway, but the courier/AWB was not assigned yet` +
       (courierReason ? ` (${courierReason})` : "") +
-      ". Do not book it again in Shipway. Press Retry in a minute: it fetches the AWB from Shipway without booking twice.";
+      (/no shipping services available|A-306|not serviceable|non[- ]serviceable/i.test(courierReason)
+        ? ". This courier cannot deliver to this address. Assign another courier to this order in Shipway; the dashboard updates automatically within a few minutes (or press Retry)."
+        : ". Do not book it again in Shipway. Press Retry in a minute: it fetches the AWB from Shipway without booking twice.");
   }
   if (isShipwayNoCourierResponse(body)) {
     const courierText = typeof body?.awb_response === "string" ? messageOf({ message: body.awb_response }, "") : "";
