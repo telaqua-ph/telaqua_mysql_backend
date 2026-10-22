@@ -17,6 +17,7 @@ import {
   markOrderSeen,
   reconcileRazorpayPayment,
   reconcilePendingRazorpayPayments,
+  listDeletedOrdersHandler,
 } from "../controllers/orderController.js";
 import {
   downloadOrderInvoice,
@@ -33,6 +34,9 @@ import { requireActiveAdmin } from "../middleware/requireActiveAdmin.js";
 const router = Router();
 
 router.get("/", requireAuth, listOrders);
+// Must stay above "/:id" so "deleted" is not read as an order id.
+router.get("/deleted", requireAuth, listDeletedOrdersHandler);
+router.get("/deleted/export", requireAuth, listDeletedOrdersHandler);
 router.post("/export", requireAuth, exportOrders);
 router.post("/", createOrder);
 router.post("/website-cod", createWebsiteCodOrder);

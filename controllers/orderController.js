@@ -6,6 +6,7 @@
  */
 
 import { isMissingTableError } from "../lib/dbErrors.js";
+import { archiveDeletedOrder, ensureDeletedOrdersTable, listDeletedOrders } from "../services/deletedOrdersService.js";
 import { query } from "../config/db.js";
 import {
   ensureWhatsappConsentColumns,
@@ -1811,9 +1812,11 @@ export async function deleteOrder(req, res) {
       });
     }
 
+    // Create the archive table before the transaction (DDL would end it).
+    await ensureDeletedOrdersTable();
     client = await pool.connect();
     await client.query("BEGIN");
-    const found = await client.query("SELECT id FROM orders WHERE id=? FOR UPDATE", [id]);
+    const found = await client.query("SELECT * FROM orders WHERE id=? FOR UPDATE", [id]);
     if (!found.rows[0]) {
       await client.query("ROLLBACK");
       return res.status(404).json({ success: false, message: "Order not found" });
@@ -1830,6 +1833,9 @@ export async function deleteOrder(req, res) {
     }
     // Child rows are deliberately removed first. This only applies to unbooked,
     // non-Delhivery placeholders; child tracking/audit rows cascade from shipments.
+    // Keep a full snapshot for the Deleted Orders card/list/CSV. If this fails,
+    // the whole delete is rolled back so no order is ever lost.
+    await archiveDeletedOrder(client, { order: found.rows[0], shipments, user: req.user });
     if (shipments.length) await client.query("DELETE FROM shipments WHERE order_id=?", [id]);
     const deleted = await client.query("DELETE FROM orders WHERE id=?", [id]);
     await client.query("COMMIT");
@@ -1849,5 +1855,16 @@ export async function deleteOrder(req, res) {
     });
   } finally {
     client?.release();
+  }
+}
+
+/** GET /api/orders/deleted and /api/orders/deleted/export (admin only) */
+export async function listDeletedOrdersHandler(req, res) {
+  try {
+    const orders = await listDeletedOrders();
+    return res.status(200).json({ success: true, count: orders.length, orders });
+  } catch (error) {
+    console.error("Deleted orders API error:", error?.message || error);
+    return res.status(500).json({ success: false, message: "Failed to load deleted orders" });
   }
 }

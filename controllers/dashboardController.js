@@ -4,6 +4,7 @@
  */
 
 import { query } from "../config/db.js";
+import { countDeletedOrders } from "../services/deletedOrdersService.js";
 
 function emptyAnalysis(from = null, to = null) {
   return {
@@ -612,6 +613,7 @@ export async function getStats(req, res) {
         monthDevicesSold: 0,
         monthCodPendingDevices: 0,
         monthRevenue: 0,
+        deletedOrders: await countDeletedOrders(),
         analysis: emptyAnalysis(from, to),
       });
     }
@@ -619,6 +621,7 @@ export async function getStats(req, res) {
     return res.status(200).json({
       success: true,
       ...mapStatsRow(stats, from, to),
+      deletedOrders: await countDeletedOrders(),
     });
   } catch (error) {
     console.error("Dashboard stats error:", {
