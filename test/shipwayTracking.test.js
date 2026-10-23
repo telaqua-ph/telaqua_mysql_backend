@@ -709,3 +709,33 @@ test("Shipway tracking routes are registered behind the admin auth middleware", 
   assert.ok(routes.includes("GET /shipway/orders/:orderId/tracking"));
   assert.ok(routes.includes("POST /shipway/orders/:orderId/tracking/refresh"));
 });
+
+test("Shipway placeholder status '0' is ignored and the latest scan decides the stage", async () => {
+  const { parseShipwayTrackingRecord } = await import("../services/shipwayService.js");
+  const withScans = parseShipwayTrackingRecord({
+    order_id: "TAQ-001175",
+    awb: "374699403276",
+    current_status: "0",
+    scans: [
+      { status: "Shipment Booked", datetime: "2026-10-22 15:00:00" },
+      { status: "In Transit", datetime: "2026-10-23 09:00:00", location: "Tirupati" },
+    ],
+  });
+  assert.equal(withScans.statusLabel, "In Transit");
+  assert.equal(withScans.fulfillmentStatus, "in_transit");
+
+  const noScans = parseShipwayTrackingRecord({ order_id: "TAQ-001175", current_status: "0" });
+  assert.equal(noScans.statusLabel, null);
+});
+
+test("shipment display never shows a bare Shipway '0'", async () => {
+  const { deriveShipmentStatusDisplay } = await import("../services/shipmentStatusDisplay.js");
+  assert.equal(
+    deriveShipmentStatusDisplay({ tracking_status: "0", shipment_status: "0", fulfillment_status: "shipment_created", waybill: "374699403276" }),
+    "Ready to Pickup"
+  );
+  assert.equal(
+    deriveShipmentStatusDisplay({ tracking_status: "Picked Up", fulfillment_status: "picked_up" }),
+    "Picked Up"
+  );
+});

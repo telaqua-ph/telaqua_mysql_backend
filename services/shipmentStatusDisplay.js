@@ -25,12 +25,21 @@ function isCreationAcknowledgement(value) {
   return /^(success|created|shipment created)$/i.test(String(value || "").trim());
 }
 
+// A bare number such as Shipway's "0" means "no status yet", not a stage.
+function isPlaceholderStatus(value) {
+  return /^(\d+|null|undefined|none|-+|n\/?a)$/i.test(String(value || "").trim());
+}
+
+function usableStatus(value) {
+  return !isCreationAcknowledgement(value) && !isPlaceholderStatus(value);
+}
+
 export function deriveShipmentStatusDisplay(order) {
   const trackingStatus = String(order?.tracking_status || "").trim();
   const shipmentStatus = String(order?.shipment_status || "").trim();
-  const rawStatus = !isCreationAcknowledgement(trackingStatus)
+  const rawStatus = usableStatus(trackingStatus)
     ? trackingStatus
-    : !isCreationAcknowledgement(shipmentStatus)
+    : usableStatus(shipmentStatus)
       ? shipmentStatus
       : "";
   const statusCode = String(

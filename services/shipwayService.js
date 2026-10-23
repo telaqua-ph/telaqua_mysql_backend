@@ -336,6 +336,14 @@ export function normalizeShipwayTime(value) {
 }
 
 const CODE_LIKE = /^[A-Z][A-Z0-9_]{1,7}$/;
+// Shipway sends "0" (or another bare number / null marker) when it has no
+// readable status for an AWB yet. That is not a stage, so it is ignored and
+// the latest scan event (if any) decides the status instead.
+const PLACEHOLDER_STATUS = /^(\d+|null|undefined|none|-+|n\/?a)$/i;
+const statusTextOf = (source, keys, max) => {
+  const value = firstText(source, keys, max);
+  return value && !PLACEHOLDER_STATUS.test(value) ? value : null;
+};
 const codeOf = (source, keys) => {
   for (const key of keys) {
     const value = textOf(source?.[key], 60);
@@ -350,7 +358,7 @@ const EVENT_TIME_KEYS = ["datetime", "date_time", "event_time", "scan_time", "sc
 function parseShipwayEvent(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const statusCode = codeOf(raw, ["status_code", "code", "shipment_status", "status"]);
-  const rawText = firstText(raw, ["status_name", "status_label", "status", "shipment_status_name", "scan_status"], 160);
+  const rawText = statusTextOf(raw, ["status_name", "status_label", "status", "shipment_status_name", "scan_status"], 160);
   const statusText = rawText && rawText !== statusCode ? rawText : null;
   const mapped = mapShipwayStatus(statusCode, statusText);
   let eventTime = null;
@@ -380,7 +388,7 @@ export function parseShipwayTrackingRecord(input) {
     if (input[key] && typeof input[key] === "object" && !Array.isArray(input[key])) record = { ...input[key], ...record };
   }
   const statusCode = codeOf(record, ["shipment_status", "shipment_status_code", "current_status_code", "status_code", "current_status", "status"]);
-  const rawText = firstText(record, ["shipment_status_name", "current_status", "status_name", "shipment_status_text", "status_description", "status"], 160);
+  const rawText = statusTextOf(record, ["shipment_status_name", "current_status", "status_name", "shipment_status_text", "status_description", "status"], 160);
   const statusText = rawText && rawText !== statusCode ? rawText : null;
   const mapped = mapShipwayStatus(statusCode, statusText);
   let eventsRaw = [];
