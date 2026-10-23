@@ -10,7 +10,7 @@ import crypto from "node:crypto";
 import { pool } from "../config/db.js";
 import { canAdvanceFulfillment } from "./logisticsState.js";
 import { isShipwayShipment } from "./shipmentProvider.js";
-import { findShipwayOrder, getShipwayTracking, isHttpUrl, safeShipwayTrackingError } from "./shipwayService.js";
+import { findShipwayOrder, getShipwayTracking, isHttpUrl, isShipwayPlaceholderStatus, safeShipwayTrackingError } from "./shipwayService.js";
 
 const DEFAULT_MINUTES = 30;
 const MIN_MINUTES = 5;
@@ -172,6 +172,14 @@ export async function refreshShipwayShipment(shipment, { db = pool, actorId = nu
   } else {
     // Stale or non-advancing event: keep the newer stored state, only mark that we checked.
     await db.query("UPDATE shipments SET last_tracking_update = NOW(), last_error = NULL WHERE id = ?", [shipment.id]);
+    // A placeholder saved earlier (Shipway "O" / "0") is not a real stage: clear it so
+    // the admin shows the stage from the fulfillment status until a courier scan arrives.
+    if (isShipwayPlaceholderStatus(shipment.shipment_status)) {
+      await db.query(
+        "UPDATE shipments SET shipment_status = NULL, shipment_status_code = NULL WHERE id = ? AND LOWER(TRIM(provider)) = 'shipway'",
+        [shipment.id]
+      );
+    }
   }
 
   return {

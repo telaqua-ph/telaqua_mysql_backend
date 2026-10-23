@@ -336,10 +336,13 @@ export function normalizeShipwayTime(value) {
 }
 
 const CODE_LIKE = /^[A-Z][A-Z0-9_]{1,7}$/;
-// Shipway sends "0" (or another bare number / null marker) when it has no
-// readable status for an AWB yet. That is not a stage, so it is ignored and
-// the latest scan event (if any) decides the status instead.
-const PLACEHOLDER_STATUS = /^(\d+|null|undefined|none|-+|n\/?a)$/i;
+// Shipway sends "O", "0" (or another single character / bare number / null
+// marker) when it has no readable status for an AWB yet. That is not a stage,
+// so it is ignored and the latest scan event (if any) decides the status.
+const PLACEHOLDER_STATUS = /^(\d+|[a-z]|null|undefined|none|-+|n\/?a)$/i;
+export function isShipwayPlaceholderStatus(value) {
+  return PLACEHOLDER_STATUS.test(String(value ?? "").trim());
+}
 const statusTextOf = (source, keys, max) => {
   const value = firstText(source, keys, max);
   return value && !PLACEHOLDER_STATUS.test(value) ? value : null;

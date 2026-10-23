@@ -1,6 +1,7 @@
 import { mapDelhiveryStatus } from "./logisticsState.js";
 
 const LABELS = Object.freeze({
+  ready_to_ship: "Ready to Ship",
   shipment_created: "Ready to Pickup",
   pickup_requested: "Ready to Pickup",
   picked_up: "Picked Up",
@@ -25,9 +26,10 @@ function isCreationAcknowledgement(value) {
   return /^(success|created|shipment created)$/i.test(String(value || "").trim());
 }
 
-// A bare number such as Shipway's "0" means "no status yet", not a stage.
+// A single character or bare number such as Shipway's "O" / "0" means
+// "no status yet", not a stage.
 function isPlaceholderStatus(value) {
-  return /^(\d+|null|undefined|none|-+|n\/?a)$/i.test(String(value || "").trim());
+  return /^(\d+|[a-z]|null|undefined|none|-+|n\/?a)$/i.test(String(value || "").trim());
 }
 
 function usableStatus(value) {

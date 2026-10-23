@@ -724,7 +724,7 @@ test("Shipway placeholder status '0' is ignored and the latest scan decides the 
   assert.equal(withScans.statusLabel, "In Transit");
   assert.equal(withScans.fulfillmentStatus, "in_transit");
 
-  const noScans = parseShipwayTrackingRecord({ order_id: "TAQ-001175", current_status: "0" });
+  const noScans = parseShipwayTrackingRecord({ order_id: "TAQ-001175", current_status: "O" });
   assert.equal(noScans.statusLabel, null);
 });
 
@@ -733,6 +733,10 @@ test("shipment display never shows a bare Shipway '0'", async () => {
   assert.equal(
     deriveShipmentStatusDisplay({ tracking_status: "0", shipment_status: "0", fulfillment_status: "shipment_created", waybill: "374699403276" }),
     "Ready to Pickup"
+  );
+  assert.equal(
+    deriveShipmentStatusDisplay({ tracking_status: "O", shipment_status: "O", fulfillment_status: "ready_to_ship", waybill: "374699403276" }),
+    "Ready to Ship"
   );
   assert.equal(
     deriveShipmentStatusDisplay({ tracking_status: "Picked Up", fulfillment_status: "picked_up" }),
