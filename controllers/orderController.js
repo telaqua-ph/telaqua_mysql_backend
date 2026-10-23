@@ -1469,6 +1469,7 @@ export async function createWebsiteCodOrder(req, res) {
 
     triggerOrderFulfillmentAsync(id);
     triggerOrderPlacedWhatsAppAsync({
+      orderDbId: id,
       customerName: orderData.customer_name,
       customerPhone: orderData.phone,
       orderId: orderNumber,

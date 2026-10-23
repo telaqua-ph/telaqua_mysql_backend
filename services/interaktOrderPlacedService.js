@@ -3,12 +3,26 @@
  * Reuses sendInteraktTemplate. Must never affect order or payment success.
  */
 
+import crypto from "node:crypto";
 import { isMissingColumnError } from "../lib/dbErrors.js";
+import { ensureInvoiceLinkTokenColumn, hashInvoiceLinkToken } from "./invoiceWhatsAppService.js";
 import { sendInteraktTemplate } from "./interaktService.js";
 import { normalizeIndianPhone } from "../utils/phoneUtils.js";
 
 const DEFAULT_TEMPLATE_NAME = "order_placed_confirmation";
 const DEFAULT_TEMPLATE_LANGUAGE = "en";
+/* Body {{n}} values in template order. Default keeps the original 3-variable template.
+ * Allowed: name, product, order_number, amount
+ * e.g. INTERAKT_ORDER_PLACED_BODY_FIELDS=name,product,order_number,amount */
+const DEFAULT_BODY_FIELDS = "name,order_number,amount";
+const DEFAULT_PRODUCT_NAME = "Tel-Aqua pH Meter";
+/* Dynamic "Download Your Invoice" URL button.
+ * INTERAKT_ORDER_PLACED_BUTTON_MODE:
+ *   (empty) - template has no dynamic button (default, unchanged behaviour)
+ *   ref     - button URL in Interakt is https://<backend>/i/{{1}} (or /i/?{{1}});
+ *             sends "<orderId>-<64 hex token>"
+ *   url     - button URL in Interakt is {{1}}; sends the full https link */
+const DEFAULT_LINK_BASE = "https://lightpink-reindeer-561421.hostingersite.com";
 
 function maskPhone(phone) {
   const s = String(phone || "");
@@ -35,7 +49,55 @@ export function getOrderPlacedTemplateConfig() {
   const languageCode = String(
     process.env.INTERAKT_ORDER_PLACED_TEMPLATE_LANGUAGE || DEFAULT_TEMPLATE_LANGUAGE
   ).trim() || DEFAULT_TEMPLATE_LANGUAGE;
-  return { templateName, languageCode };
+  const bodyFields = String(process.env.INTERAKT_ORDER_PLACED_BODY_FIELDS || DEFAULT_BODY_FIELDS)
+    .split(",")
+    .map((field) => field.trim().toLowerCase())
+    .filter(Boolean);
+  const buttonMode = String(process.env.INTERAKT_ORDER_PLACED_BUTTON_MODE || "").trim().toLowerCase();
+  return {
+    templateName,
+    languageCode,
+    bodyFields,
+    ...(buttonMode === "ref" || buttonMode === "url" ? { buttonMode } : {}),
+  };
+}
+
+/**
+ * Create a per-order secure invoice link for the WhatsApp button.
+ * Uses the same token column and /i/<orderId>-<token> route as the invoice-link WhatsApp flow,
+ * so routes/invoiceLink.js serves the PDF for exactly this order.
+ */
+export async function createOrderInvoiceLinkRef(orderDbId) {
+  const id = Number(orderDbId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const { query } = await import("../config/db.js");
+  await ensureInvoiceLinkTokenColumn();
+  const token = crypto.randomBytes(32).toString("hex");
+  const updated = await query(
+    `UPDATE orders SET whatsapp_invoice_token_hash = ? WHERE id = ?`,
+    [hashInvoiceLinkToken(token), id]
+  );
+  return updated.rowCount ? `${id}-${token}` : null;
+}
+
+export function buildOrderPlacedButtonValue(ref, buttonMode, linkBase = process.env.BACKEND_BASE_URL) {
+  if (!ref) return "";
+  if (buttonMode === "url") {
+    const base = String(linkBase || DEFAULT_LINK_BASE).trim().replace(/\/+$/, "");
+    return `${base}/i/${ref}`;
+  }
+  return ref;
+}
+
+/** Body values in the order the approved template expects. */
+export function buildOrderPlacedBodyValues({ name, orderId, amount, productName }, bodyFields) {
+  const values = {
+    name: String(name || "").trim() || "Customer",
+    product: String(productName || "").trim() || DEFAULT_PRODUCT_NAME,
+    order_number: String(orderId || "").trim(),
+    amount: String(amount || "").trim(),
+  };
+  return bodyFields.map((field) => values[field] ?? "");
 }
 
 async function loadOrderForConfirmation(orderDbId) {
@@ -121,7 +183,17 @@ export async function sendOrderPlacedWhatsApp({
   }
 
   const displayName = String(name || "").trim() || "Customer";
-  const { templateName, languageCode } = getOrderPlacedTemplateConfig();
+  const { templateName, languageCode, bodyFields, buttonMode } = getOrderPlacedTemplateConfig();
+
+  let buttonValues;
+  if (buttonMode) {
+    const ref = await createOrderInvoiceLinkRef(orderDbId);
+    if (!ref) {
+      console.warn(`[WhatsApp] Order confirmation skipped for order ${savedOrderId}: invoice link unavailable`);
+      return { skipped: true, reason: "invoice_link_unavailable" };
+    }
+    buttonValues = { 0: [buildOrderPlacedButtonValue(ref, buttonMode)] };
+  }
 
   await sendInteraktTemplate({
     countryCode: parsed.countryCode,
@@ -130,7 +202,13 @@ export async function sendOrderPlacedWhatsApp({
     template: {
       name: templateName,
       languageCode,
-      bodyValues: [displayName, savedOrderId, amountStr],
+      bodyValues: buildOrderPlacedBodyValues({
+        name: displayName,
+        orderId: savedOrderId,
+        amount: amountStr,
+        productName: process.env.TELAQUA_PRODUCT_NAME,
+      }, bodyFields),
+      ...(buttonValues ? { buttonValues } : {}),
     },
   });
 

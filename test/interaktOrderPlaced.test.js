@@ -24,6 +24,7 @@ test("order placed template defaults to approved utility name", () => {
     assert.deepEqual(getOrderPlacedTemplateConfig(), {
       templateName: "order_placed_confirmation",
       languageCode: "en",
+      bodyFields: ["name", "order_number", "amount"],
     });
   } finally {
     if (originalName === undefined) delete process.env.INTERAKT_ORDER_PLACED_TEMPLATE_NAME;
@@ -74,4 +75,25 @@ test("missing order ID skips WhatsApp", async () => {
   });
   assert.equal(result.skipped, true);
   assert.equal(result.reason, "missing_order_id");
+});
+
+test("order-placed body values follow the configured template variables", async () => {
+  const { buildOrderPlacedBodyValues } = await import("../services/interaktOrderPlacedService.js");
+  const data = { name: "Ravi", orderId: "TAQ-001200", amount: "1799", productName: "" };
+  assert.deepEqual(buildOrderPlacedBodyValues(data, ["name", "order_number", "amount"]), ["Ravi", "TAQ-001200", "1799"]);
+  assert.deepEqual(
+    buildOrderPlacedBodyValues(data, ["name", "product", "order_number", "amount"]),
+    ["Ravi", "Tel-Aqua pH Meter", "TAQ-001200", "1799"]
+  );
+});
+
+test("invoice button value is the order ref, or the full link in url mode", async () => {
+  const { buildOrderPlacedButtonValue } = await import("../services/interaktOrderPlacedService.js");
+  const ref = `1200-${"a".repeat(64)}`;
+  assert.equal(buildOrderPlacedButtonValue(ref, "ref"), ref);
+  assert.equal(
+    buildOrderPlacedButtonValue(ref, "url", "https://lightpink-reindeer-561421.hostingersite.com/"),
+    `https://lightpink-reindeer-561421.hostingersite.com/i/${ref}`
+  );
+  assert.equal(buildOrderPlacedButtonValue("", "ref"), "");
 });
