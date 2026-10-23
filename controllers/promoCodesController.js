@@ -16,6 +16,7 @@ import {
   promoCodeExists,
 } from "../services/promoService.js";
 import { parsePromoValidityRange } from "../utils/promoValidity.js";
+import { getUniqueSuccessfulCustomersByCoupon } from "../services/couponUsageService.js";
 
 function trimStr(value) {
   return typeof value === "string" ? value.trim() : value;
@@ -192,7 +193,22 @@ export async function listPromoCodesHandler(req, res) {
     }
 
     const rows = await listPromoCodes(status);
-    const promoCodes = rows.map((row) => toAdminPromo(mapPromoRecord(row)));
+    let usageByCode = null;
+    try {
+      usageByCode = await getUniqueSuccessfulCustomersByCoupon();
+    } catch (usageError) {
+      // The list still loads; the admin falls back to used_count.
+      console.error("Coupon usage count error:", usageError?.message || usageError);
+    }
+    const promoCodes = rows.map((row) => {
+      const promo = toAdminPromo(mapPromoRecord(row));
+      if (usageByCode) {
+        // Unique customers with a successfully placed order using this code.
+        promo.unique_successful_customers =
+          usageByCode.get(normalizePromoCode(promo.code)) ?? 0;
+      }
+      return promo;
+    });
 
     return res.status(200).json({
       success: true,

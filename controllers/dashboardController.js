@@ -62,7 +62,7 @@ function mapStatsRow(row, from, to) {
   };
 }
 
-async function readOrdersColumns() {
+export async function readOrdersColumns() {
   const { rows } = await query(
     `SELECT COLUMN_NAME AS column_name
      FROM information_schema.COLUMNS
@@ -88,7 +88,7 @@ async function hasAdminOrderViewsTable() {
  * orders.shipment_status columns. Without this, "Shipments Created"
  * never counts shipments created via the current Fulfillment flow.
  */
-async function hasShipmentsTable() {
+export async function hasShipmentsTable() {
   const { rows } = await query(
     `SELECT COUNT(*) AS cnt
      FROM information_schema.TABLES
@@ -98,7 +98,7 @@ async function hasShipmentsTable() {
   return Number(rows[0]?.cnt || 0) > 0;
 }
 
-async function hasInventoryHistoryTable() {
+export async function hasInventoryHistoryTable() {
   const { rows } = await query(
     `SELECT COUNT(*) AS cnt
      FROM information_schema.TABLES
@@ -148,7 +148,7 @@ function shipmentPredicate(columns, alias = "", includeShipmentsTable = false) {
  * Same rule as services/paymentMode.js isCodOrder:
  * payment_mode = cod, or legacy payment_method when mode is not razorpay.
  */
-function codOrderPredicate(columns, alias = "") {
+export function codOrderPredicate(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
   const hasMode = columns.has("payment_mode");
   const hasMethod = columns.has("payment_method");
@@ -188,7 +188,7 @@ function confirmedOrderPredicate(columns, alias = "") {
  * Blank, New, and Pending stay New even when payment_status is Paid.
  * Waybill and shipment columns are not read, so a shipment cannot confirm an order.
  */
-function deviceConfirmationPredicate(columns, alias = "") {
+export function deviceConfirmationPredicate(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
   const statusExpr = columns.has("order_status")
     ? `LOWER(TRIM(COALESCE(${prefix}order_status, '')))`
@@ -239,7 +239,7 @@ function createdDateExpression(columns, alias = "") {
  * device reporting also checks the inventory cancellation audit and shipment
  * cancellation records whenever those tables are installed.
  */
-function cancellationPredicate(columns, alias = "", includeInventoryHistory = false, includeShipmentsTable = false) {
+export function cancellationPredicate(columns, alias = "", includeInventoryHistory = false, includeShipmentsTable = false) {
   const prefix = alias ? `${alias}.` : "";
   const signals = [
     `LOWER(TRIM(COALESCE(${prefix}order_status, ''))) IN ('cancelled', 'canceled')`,
