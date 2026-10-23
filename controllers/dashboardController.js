@@ -564,6 +564,21 @@ export async function getInventoryDevicesSold(adminId, fetchStats = fetchDashboa
   return Number(stats?.devices_sold || 0);
 }
 
+/**
+ * Inventory device quantities (all time):
+ * - paidSold: Revenue's "All-time Devices Sold" (paid, confirmed, not cancelled/RTO/test)
+ * - codPending: confirmed COD devices still Payment Pending (not cancelled/RTO/test).
+ *   Website COD orders are created as Confirmed, so each new COD order adds its quantity;
+ *   cancelling it removes it again.
+ */
+export async function getInventoryDeviceCounts(adminId, fetchStats = fetchDashboardStats) {
+  const stats = await fetchStats({ adminId, from: null, to: null });
+  return {
+    paidSold: Number(stats?.devices_sold || 0),
+    codPending: Number(stats?.cod_pending_devices || 0),
+  };
+}
+
 export async function getStats(req, res) {
   const adminId = Number(req.user?.admin_id || req.user?.id);
   if (!Number.isInteger(adminId) || adminId <= 0) {

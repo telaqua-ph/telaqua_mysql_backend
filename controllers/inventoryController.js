@@ -12,7 +12,7 @@ import {
   markNotificationRead,
   updateLowStockThreshold,
 } from "../services/inventoryService.js";
-import { getInventoryDevicesSold } from "./dashboardController.js";
+import { getInventoryDeviceCounts } from "./dashboardController.js";
 import { isMissingTableError } from "../lib/dbErrors.js";
 
 function adminId(req) {
@@ -22,14 +22,18 @@ function adminId(req) {
 
 export async function getInventory(req, res) {
   try {
-    const [data, dashboardSold] = await Promise.all([
+    const [data, deviceCounts] = await Promise.all([
       getInventorySummary(),
-      getInventoryDevicesSold(adminId(req)),
+      getInventoryDeviceCounts(adminId(req)),
     ]);
-    // Sold mirrors Revenue's "All-time Devices Sold" paid device quantity.
+    // Sold = Revenue's "All-time Devices Sold" (paid) + confirmed COD devices
+    // still Payment Pending. Cancelled and RTO orders are excluded from both.
     // Remaining is intentionally derived from the unchanged total stock.
-    data.totals.sold = dashboardSold;
-    data.totals.remaining = Number(data.totals.total_stock || 0) - dashboardSold;
+    const committed = deviceCounts.paidSold + deviceCounts.codPending;
+    data.totals.paid_sold = deviceCounts.paidSold;
+    data.totals.cod_payment_pending = deviceCounts.codPending;
+    data.totals.sold = committed;
+    data.totals.remaining = Number(data.totals.total_stock || 0) - committed;
     return res.status(200).json({ success: true, ...data });
   } catch (err) {
     console.error("GET inventory error:", err?.message);
