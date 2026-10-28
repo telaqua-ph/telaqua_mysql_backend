@@ -58,6 +58,10 @@ export async function generateLocalInvoicePdf(order) {
   const gstRate = Number(order.gst_rate ?? 18);
   const isPaid = String(order.payment_status || "").trim() === "Paid";
   const cod = isCodOrder(order);
+  // ₹99 non-refundable delivery charge, paid online in advance on COD orders.
+  const deliveryCharge = cod && order.cod_advance_status === "paid"
+    ? Number(order.cod_advance_fee || 0)
+    : 0;
   const paymentLabel = cod
     ? "COD"
     : String(order.payment_method || "Razorpay");
@@ -67,7 +71,11 @@ export async function generateLocalInvoicePdf(order) {
   const footerReference = cod
     ? (isPaid
       ? "COD payment collected."
-      : "Cash on delivery. Payment is pending until collected.")
+      : "Cash on delivery. Payment is pending until collected.") +
+      (deliveryCharge > 0
+        ? ` Delivery charge of ${money(deliveryCharge)} paid online in advance (non-refundable)` +
+          (order.cod_advance_razorpay_payment_id ? `, Razorpay reference ${order.cod_advance_razorpay_payment_id}.` : ".")
+        : "")
     : `Razorpay payment reference: ${order.razorpay_payment_id || "-"}`;
   const footerNote = isPaid
     ? "This fallback copy was generated from the paid order snapshot."
@@ -137,16 +145,31 @@ export async function generateLocalInvoicePdf(order) {
     cell(doc, "Shipping", 365, summaryY, 100);
     cell(doc, money(shipping), 465, summaryY, 77, { align: "right" });
   }
+  // The delivery charge is already paid, so TOTAL DUE stays the product amount
+  // and a paid COD order shows the full order value (product + delivery charge).
+  let boxTotal = finalTotal;
+  if (deliveryCharge > 0) {
+    summaryY += 20;
+    cell(doc, "Delivery charges", 365, summaryY, 100);
+    cell(doc, money(deliveryCharge), 465, summaryY, 77, { align: "right" });
+    summaryY += 14;
+    cell(doc, "(paid online, non-refundable)", 365, summaryY, 177, { size: 7, color: "#52616B" });
+    summaryY += 20;
+    cell(doc, "Order value", 365, summaryY, 100, { bold: true });
+    cell(doc, money(finalTotal + deliveryCharge), 465, summaryY, 77, { align: "right", bold: true });
+    if (isPaid) boxTotal = finalTotal + deliveryCharge;
+  }
   summaryY += 28;
   doc.rect(355, summaryY - 7, 195, 32).fill("#063970");
   cell(doc, totalLabel, 365, summaryY + 3, 90, { bold: true, size: 11, color: "#FFFFFF" });
-  cell(doc, money(finalTotal), 455, summaryY + 3, 87, {
+  cell(doc, money(boxTotal), 455, summaryY + 3, 87, {
     bold: true, size: 11, color: "#FFFFFF", align: "right",
   });
 
   doc.fillColor("#52616B").font("Helvetica").fontSize(8)
-    .text(footerReference, 45, 690, { width: 505 })
-    .text(footerNote, 45, 708, { width: 505 })
+    .text(footerReference, 45, 690, { width: 505 });
+  // Below the reference, which can wrap to two lines on COD advance orders.
+  doc.text(footerNote, 45, Math.max(708, doc.y + 6), { width: 505 })
     .text("Thank you for choosing Tel-Aqua.", 45, 750, { width: 505, align: "center" });
   doc.end();
 

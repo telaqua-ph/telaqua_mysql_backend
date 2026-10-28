@@ -55,12 +55,23 @@ const ORDER_SELECT = `
     swipe_invoice_id, swipe_invoice_error, whatsapp_invoice_status,
     whatsapp_invoice_message_id, whatsapp_invoice_sent_at,
     whatsapp_invoice_error, whatsapp_updates_consent, whatsapp_consent_at
+    /*COD_ADVANCE*/
   FROM orders WHERE id = ? LIMIT 1
 `;
 
+// ₹99 COD advance delivery fee columns (sql/add_cod_advance_fee.sql).
+const COD_ADVANCE_SELECT = ", cod_advance_fee, cod_advance_status, cod_advance_razorpay_payment_id, cod_amount_due";
+
 export async function loadOrderForFulfillment(orderId) {
-  const { rows } = await query(ORDER_SELECT, [orderId]);
-  return rows[0] || null;
+  try {
+    const { rows } = await query(ORDER_SELECT.replace("/*COD_ADVANCE*/", COD_ADVANCE_SELECT), [orderId]);
+    return rows[0] || null;
+  } catch (error) {
+    // Databases without the COD advance migration still load the order.
+    if (error?.code !== "ER_BAD_FIELD_ERROR" || !/cod_a/i.test(String(error?.message))) throw error;
+    const { rows } = await query(ORDER_SELECT, [orderId]);
+    return rows[0] || null;
+  }
 }
 
 function round2(value) {
