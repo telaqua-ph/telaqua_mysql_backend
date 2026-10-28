@@ -13,6 +13,32 @@ import {
 } from "../services/confirmRazorpayPayment.js";
 import { query } from "../config/db.js";
 import { notifyPaymentFailedCheckoutReminder } from "../services/checkoutReminderService.js";
+import {
+  finalizeCodAdvancePayment,
+  findCodAdvanceByRazorpayOrderId,
+  markCodAdvanceFailed,
+} from "../services/codAdvanceService.js";
+
+/** ₹99 COD advance payments live in cod_advance_payments, not orders. */
+async function handleCodAdvanceWebhook(eventType, razorpayOrderId, paymentId) {
+  let attempt;
+  try {
+    attempt = await findCodAdvanceByRazorpayOrderId(razorpayOrderId);
+  } catch (error) {
+    if (error?.code === "ER_NO_SUCH_TABLE") return null;
+    throw error;
+  }
+  if (!attempt) return null;
+  if (eventType === "payment.failed") {
+    await markCodAdvanceFailed(razorpayOrderId, "Payment failed (webhook)");
+    return { status: "failed" };
+  }
+  return finalizeCodAdvancePayment({
+    razorpayOrderId,
+    razorpayPaymentId: paymentId || null,
+    source: "webhook",
+  });
+}
 
 function validSignature(rawBody, received, secret) {
   const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
@@ -112,6 +138,12 @@ export async function handleRazorpayWebhook(req, res) {
   }
 
   try {
+    const codAdvance = await handleCodAdvanceWebhook(eventType, razorpayOrderId, payloadPayment.id);
+    if (codAdvance) {
+      logPaymentEvent("COD_ADVANCE_WEBHOOK", { eventType, razorpayOrderId, status: codAdvance.status });
+      return res.status(200).json({ success: true, cod_advance: codAdvance.status });
+    }
+
     if (eventType === "payment.failed") {
       const failed = await markRazorpayPaymentFailed(razorpayOrderId, eventId, eventType);
       if (failed.status === "not_found") {

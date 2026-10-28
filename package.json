@@ -19,6 +19,7 @@
     "migrate:shipway": "node scripts/migrate-shipway-logistics.js",
     "migrate:payment-mode": "node scripts/migrate-payment-mode.js",
     "migrate:admin-web-push": "node scripts/migrate-admin-web-push.js",
+    "migrate:cod-advance-fee": "node scripts/migrate-cod-advance-fee.js",
     "test": "node --test --test-isolation=none"
   },
   "dependencies": {
