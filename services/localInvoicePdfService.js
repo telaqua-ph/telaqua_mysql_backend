@@ -154,10 +154,14 @@ export async function generateLocalInvoicePdf(order) {
     cell(doc, money(deliveryCharge), 465, summaryY, 77, { align: "right" });
     summaryY += 14;
     cell(doc, "(paid online, non-refundable)", 365, summaryY, 177, { size: 7, color: "#52616B" });
-    summaryY += 20;
-    cell(doc, "Order value", 365, summaryY, 100, { bold: true });
-    cell(doc, money(finalTotal + deliveryCharge), 465, summaryY, 77, { align: "right", bold: true });
+    summaryY += 28;
+    doc.rect(355, summaryY - 7, 195, 32).fill("#063970");
+    cell(doc, "ORDER VALUE", 365, summaryY + 3, 90, { bold: true, size: 11, color: "#FFFFFF" });
+    cell(doc, money(finalTotal + deliveryCharge), 455, summaryY + 3, 87, {
+      bold: true, size: 11, color: "#FFFFFF", align: "right",
+    });
     if (isPaid) boxTotal = finalTotal + deliveryCharge;
+    summaryY += 12;
   }
   summaryY += 28;
   doc.rect(355, summaryY - 7, 195, 32).fill("#063970");
