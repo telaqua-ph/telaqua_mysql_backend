@@ -41,7 +41,6 @@ import { pool } from "../config/db.js";
 import crypto from "node:crypto";
 import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSafety.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
-import { isCodAdvanceFeeRequired } from "../services/codAdvanceService.js";
 
 const ALLOWED_ORDER_STATUSES = [
   "New",
@@ -54,7 +53,7 @@ const ALLOWED_ORDER_STATUSES = [
 
 const ALLOWED_PAYMENT_STATUSES = ["Pending", "Paid", "Failed", "Refunded"];
 
-export function createInvoiceAccessToken() {
+function createInvoiceAccessToken() {
   const token = crypto.randomBytes(32).toString("hex");
   const hash = crypto.createHash("sha256").update(token).digest("hex");
   return { token, hash };
@@ -287,9 +286,7 @@ export function filterOrdersForExport(rows, input = {}) {
     if (status !== "All" && deriveOrderConfirmationStatus(order) !== status) return false;
     if (payment !== "All" && exportText(order.payment_status) !== payment) return false;
     const normalizedMode = String(order.payment_mode || order.paymentMethod || "razorpay").toLowerCase() === "cod" ? "COD" : "Razorpay";
-    if (paymentMode === "COD Advance") {
-      if (normalizedMode !== "COD" || !order.cod_advance_status) return false;
-    } else if (paymentMode !== "All" && normalizedMode !== paymentMode) return false;
+    if (paymentMode !== "All" && normalizedMode !== paymentMode) return false;
     if (shipment !== "All" && exportShipmentLabel(order) !== shipment) return false;
     if (filters.unseenOnly === true && Boolean(order.is_seen)) return false;
     if (search) {
@@ -501,7 +498,7 @@ function validateManualCodOrder(body) {
 }
 
 /** Website COD: same shipping/qty rules as Razorpay create-order. Never trust client prices. */
-export function validateWebsiteCodOrder(body) {
+function validateWebsiteCodOrder(body) {
   if (!body || typeof body !== "object") {
     return { error: "Invalid JSON body" };
   }
@@ -1190,18 +1187,8 @@ export async function createManualCodOrder(req, res) {
   }
 }
 
-/**
- * POST /api/orders/website-cod — legacy storefront COD without the ₹99 advance.
- * Disabled while COD_ADVANCE_FEE_ENABLED (default on): use /website-cod/advance/*.
- */
+/** POST /api/orders/website-cod — public storefront COD. Does not touch Razorpay. */
 export async function createWebsiteCodOrder(req, res) {
-  if (isCodAdvanceFeeRequired()) {
-    return res.status(410).json({
-      success: false,
-      code: "COD_ADVANCE_REQUIRED",
-      message: "Cash on Delivery now needs a ₹99 advance delivery charge. Please refresh the checkout page.",
-    });
-  }
   try {
     const body = req.body;
     if (body == null || typeof body !== "object") {

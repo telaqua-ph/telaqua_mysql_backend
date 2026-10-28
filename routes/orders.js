@@ -28,13 +28,6 @@ import {
   getOrderDeliveryDetailsHistory,
   updateOrderDeliveryDetails,
 } from "../controllers/orderDeliveryDetailsController.js";
-import {
-  createCodAdvanceOrder,
-  listCodAdvanceIssuesHandler,
-  refundCodAdvance,
-  retryCodAdvanceOrder,
-  verifyCodAdvancePayment,
-} from "../controllers/codAdvanceController.js";
 import { requireAuth } from "../middleware/auth.js";
 import { requireActiveAdmin } from "../middleware/requireActiveAdmin.js";
 
@@ -47,11 +40,6 @@ router.get("/deleted/export", requireAuth, listDeletedOrdersHandler);
 router.post("/export", requireAuth, exportOrders);
 router.post("/", createOrder);
 router.post("/website-cod", createWebsiteCodOrder);
-router.post("/website-cod/advance/create-order", createCodAdvanceOrder);
-router.post("/website-cod/advance/verify", verifyCodAdvancePayment);
-router.get("/cod-advance/issues", requireAuth, listCodAdvanceIssuesHandler);
-router.post("/cod-advance/:razorpayOrderId/retry", requireAuth, retryCodAdvanceOrder);
-router.post("/cod-advance/:id/refund", requireAuth, refundCodAdvance);
 router.post("/manual-cod", requireAuth, createManualCodOrder);
 router.patch("/cod-payment/bulk", requireAuth, collectBulkCodPayments);
 router.post("/:id/mark-seen", requireAuth, markOrderSeen);

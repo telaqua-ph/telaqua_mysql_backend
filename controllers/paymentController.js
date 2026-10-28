@@ -276,7 +276,7 @@ function validateVerifyPayload(body) {
   };
 }
 
-export function isValidRazorpaySignature(orderId, paymentId, signature) {
+function isValidRazorpaySignature(orderId, paymentId, signature) {
   const secret = process.env.RAZORPAY_KEY_SECRET;
   if (!secret) {
     throw new Error("RAZORPAY_KEY_SECRET must be configured");
