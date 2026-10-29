@@ -441,3 +441,41 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
   }
   return latest;
 }
+
+/**
+ * Removes a lead from the admin Leads page. Soft delete only: the attempt is
+ * marked 'dismissed' and kept for audit. Older unpaid attempts from the same
+ * phone are dismissed too, so they do not reappear in its place. A ₹99 payment
+ * that arrives later for a dismissed attempt still creates the order (finalize
+ * does not depend on this status).
+ * @returns {Promise<number>} number of attempts dismissed (0 = not found / already gone)
+ */
+export async function dismissUnpaidCodCheckout(attemptId) {
+  const id = Number(attemptId);
+  if (!Number.isInteger(id) || id <= 0) return 0;
+  const { rows } = await query(
+    `SELECT id, JSON_UNQUOTE(JSON_EXTRACT(checkout_payload, '$.orderData.phone')) AS phone
+     FROM cod_advance_payments
+     WHERE id = ? AND order_id IS NULL AND status IN ('created', 'failed')`,
+    [id]
+  );
+  const attempt = rows[0];
+  if (!attempt) return 0;
+  const phone = attempt.phone && attempt.phone !== "null" ? String(attempt.phone) : "";
+  const result = phone
+    ? await query(
+        `UPDATE cod_advance_payments
+         SET status = 'dismissed'
+         WHERE order_id IS NULL AND status IN ('created', 'failed')
+           AND (id = ? OR (id < ? AND JSON_UNQUOTE(JSON_EXTRACT(checkout_payload, '$.orderData.phone')) = ?))`,
+        [id, id, phone]
+      )
+    : await query(
+        `UPDATE cod_advance_payments SET status = 'dismissed'
+         WHERE id = ? AND order_id IS NULL AND status IN ('created', 'failed')`,
+        [id]
+      );
+  const changed = result.rowCount ?? result.affectedRows ?? 0;
+  if (changed) logPaymentEvent("COD_LEAD_DISMISSED", { codAdvanceId: id, dismissed: changed });
+  return changed;
+}

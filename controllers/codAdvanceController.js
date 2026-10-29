@@ -19,6 +19,7 @@ import {
   finalizeCodAdvancePayment,
   listCodAdvanceIssues,
   listUnpaidCodCheckouts,
+  dismissUnpaidCodCheckout,
   markCodAdvanceRefunded,
 } from "../services/codAdvanceService.js";
 import { createInvoiceAccessToken, validateWebsiteCodOrder } from "./orderController.js";
@@ -168,6 +169,19 @@ export async function listUnpaidCodCheckoutsHandler(req, res) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
     console.error("Unpaid COD checkouts error:", error);
     return res.status(500).json({ success: false, message: "Unable to load unpaid COD checkouts." });
+  }
+}
+
+/** DELETE /api/orders/cod-advance/unpaid/:id (admin) — remove a lead from the Leads page. */
+export async function deleteUnpaidCodCheckoutHandler(req, res) {
+  try {
+    const dismissed = await dismissUnpaidCodCheckout(req.params.id);
+    if (!dismissed) return res.status(404).json({ success: false, message: "Lead not found or already removed." });
+    return res.json({ success: true, dismissed });
+  } catch (error) {
+    if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
+    console.error("Delete lead error:", error);
+    return res.status(500).json({ success: false, message: "Unable to delete the lead." });
   }
 }
 

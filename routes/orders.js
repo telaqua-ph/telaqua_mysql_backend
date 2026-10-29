@@ -32,6 +32,7 @@ import {
   createCodAdvanceOrder,
   listCodAdvanceIssuesHandler,
   listUnpaidCodCheckoutsHandler,
+  deleteUnpaidCodCheckoutHandler,
   refundCodAdvance,
   retryCodAdvanceOrder,
   verifyCodAdvancePayment,
@@ -52,6 +53,7 @@ router.post("/website-cod/advance/create-order", createCodAdvanceOrder);
 router.post("/website-cod/advance/verify", verifyCodAdvancePayment);
 router.get("/cod-advance/issues", requireAuth, listCodAdvanceIssuesHandler);
 router.get("/cod-advance/unpaid", requireAuth, listUnpaidCodCheckoutsHandler);
+router.delete("/cod-advance/unpaid/:id", requireAuth, deleteUnpaidCodCheckoutHandler);
 router.post("/cod-advance/:razorpayOrderId/retry", requireAuth, retryCodAdvanceOrder);
 router.post("/cod-advance/:id/refund", requireAuth, refundCodAdvance);
 router.post("/manual-cod", requireAuth, createManualCodOrder);

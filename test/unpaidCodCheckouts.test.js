@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../config/db.js";
-import { leadsStartEpochSeconds, listUnpaidCodCheckouts } from "../services/codAdvanceService.js";
+import { dismissUnpaidCodCheckout, leadsStartEpochSeconds, listUnpaidCodCheckouts } from "../services/codAdvanceService.js";
 
 test("unpaid COD checkouts: one latest row per phone, JSON nulls cleaned", async () => {
   const original = pool.query;
@@ -49,5 +49,29 @@ test("leads start date defaults to 29 Oct 2026 1:00 PM IST and can be overridden
   } finally {
     if (saved === undefined) delete process.env.LEADS_START_AT;
     else process.env.LEADS_START_AT = saved;
+  }
+});
+
+test("deleting a lead soft-dismisses it and older unpaid attempts from the same phone", async () => {
+  const original = pool.query;
+  const calls = [];
+  pool.query = async (sql, params) => {
+    const s = String(sql).replace(/\s+/g, " ").trim();
+    calls.push({ s, params });
+    if (s.startsWith("SELECT id")) return { rows: params[0] === 9 ? [{ id: 9, phone: "9876543210" }] : [] };
+    if (s.startsWith("UPDATE")) return { rows: [], affectedRows: 2 };
+    throw new Error("unexpected " + s);
+  };
+  try {
+    assert.equal(await dismissUnpaidCodCheckout(9), 2);
+    const update = calls.find((c) => c.s.startsWith("UPDATE"));
+    assert.match(update.s, /SET status = 'dismissed'/);
+    assert.match(update.s, /order_id IS NULL/);
+    assert.doesNotMatch(update.s, /DELETE/);
+    assert.deepEqual(update.params, [9, 9, "9876543210"]);
+    assert.equal(await dismissUnpaidCodCheckout(404), 0);
+    assert.equal(await dismissUnpaidCodCheckout("abc"), 0);
+  } finally {
+    pool.query = original;
   }
 });
