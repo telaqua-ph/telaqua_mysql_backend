@@ -368,3 +368,62 @@ export async function markCodAdvanceRefunded(attemptId, note) {
   );
   return (result.rowCount ?? result.affectedRows ?? 0) > 0;
 }
+
+/**
+ * COD checkouts where the customer filled in the address but never paid the ₹99
+ * (closed the Razorpay window or the payment failed). No order row exists for
+ * these. Shown read-only in the admin Orders list so the team can follow up.
+ *
+ * - One row per phone number (the latest attempt).
+ * - Skipped once that phone has placed any order after the attempt.
+ */
+export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
+  const { rows } = await query(
+    `SELECT cap.id, cap.status, cap.product_amount, cap.failure_reason,
+            cap.razorpay_order_id, cap.created_at, cap.updated_at,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.customer_name')) AS customer_name,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone')) AS phone,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.email')) AS email,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.address')) AS address,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.city')) AS city,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.state')) AS state,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.pincode')) AS pincode,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.quantity')) AS quantity,
+            JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.promo_code')) AS promo_code
+     FROM cod_advance_payments cap
+     WHERE cap.order_id IS NULL
+       AND cap.status IN ('created', 'failed')
+       AND NOT EXISTS (
+         SELECT 1 FROM orders o
+         WHERE o.phone = JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone'))
+           AND o.created_at >= cap.created_at
+       )
+     ORDER BY cap.created_at DESC, cap.id DESC
+     LIMIT ?`,
+    [Number(limit) || 500]
+  );
+
+  const seenPhones = new Set();
+  const latest = [];
+  for (const row of rows) {
+    const clean = (value) => (value == null || value === "null" ? "" : String(value));
+    const phone = clean(row.phone);
+    const key = phone || `attempt-${row.id}`;
+    if (seenPhones.has(key)) continue;
+    seenPhones.add(key);
+    latest.push({
+      ...row,
+      customer_name: clean(row.customer_name),
+      phone,
+      email: clean(row.email),
+      address: clean(row.address),
+      city: clean(row.city),
+      state: clean(row.state),
+      pincode: clean(row.pincode),
+      promo_code: clean(row.promo_code),
+      quantity: Number(row.quantity) || 1,
+      product_amount: Number(row.product_amount) || 0,
+    });
+  }
+  return latest;
+}

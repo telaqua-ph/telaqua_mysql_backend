@@ -18,6 +18,7 @@ import {
   createCodAdvanceCheckout,
   finalizeCodAdvancePayment,
   listCodAdvanceIssues,
+  listUnpaidCodCheckouts,
   markCodAdvanceRefunded,
 } from "../services/codAdvanceService.js";
 import { createInvoiceAccessToken, validateWebsiteCodOrder } from "./orderController.js";
@@ -156,6 +157,17 @@ export async function listCodAdvanceIssuesHandler(req, res) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
     console.error("COD advance issues error:", error);
     return res.status(500).json({ success: false, message: "Unable to load COD advance payments." });
+  }
+}
+
+/** GET /api/orders/cod-advance/unpaid (admin) — COD checkouts left without paying the ₹99. */
+export async function listUnpaidCodCheckoutsHandler(req, res) {
+  try {
+    return res.json({ success: true, checkouts: await listUnpaidCodCheckouts() });
+  } catch (error) {
+    if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
+    console.error("Unpaid COD checkouts error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load unpaid COD checkouts." });
   }
 }
 
