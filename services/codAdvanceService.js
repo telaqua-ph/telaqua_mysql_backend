@@ -388,7 +388,9 @@ export function leadsStartEpochSeconds() {
  *
  * - Only checkouts started on/after the leads start date.
  * - One row per phone number (the latest attempt).
- * - Skipped once that phone has placed any order after the attempt.
+ * - Removed only when that phone places a REAL order afterwards: a COD order or
+ *   a paid online order. An unpaid online (Razorpay) order from the same phone
+ *   is itself a lead and must NOT hide the COD lead.
  */
 export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
   const { rows } = await query(
@@ -411,6 +413,12 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
          SELECT 1 FROM orders o
          WHERE o.phone = JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone'))
            AND o.created_at >= cap.created_at
+           AND (
+             LOWER(TRIM(COALESCE(o.payment_status, ''))) = 'paid'
+             OR LOWER(TRIM(COALESCE(o.payment_mode, ''))) = 'cod'
+             OR (LOWER(TRIM(COALESCE(o.payment_mode, ''))) <> 'razorpay'
+                 AND LOWER(TRIM(COALESCE(o.payment_method, ''))) IN ('cod', 'cash on delivery', 'cash_on_delivery'))
+           )
        )
      ORDER BY cap.created_at DESC, cap.id DESC
      LIMIT ?`,
