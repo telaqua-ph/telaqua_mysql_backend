@@ -23,6 +23,7 @@ import {
   markCodAdvanceRefunded,
 } from "../services/codAdvanceService.js";
 import { createInvoiceAccessToken, validateWebsiteCodOrder } from "./orderController.js";
+import { listOnlineLeadOrders } from "../services/leads.js";
 import { isValidRazorpaySignature } from "./paymentController.js";
 
 const MIGRATION_MESSAGE = "COD advance tables are missing. Run node scripts/migrate-cod-advance-fee.js";
@@ -161,10 +162,11 @@ export async function listCodAdvanceIssuesHandler(req, res) {
   }
 }
 
-/** GET /api/orders/cod-advance/unpaid (admin) — Leads: COD checkouts left without paying the ₹99. */
+/** GET /api/orders/cod-advance/unpaid (admin) — Leads: unpaid COD checkouts and unpaid online orders. */
 export async function listUnpaidCodCheckoutsHandler(req, res) {
   try {
-    return res.json({ success: true, checkouts: await listUnpaidCodCheckouts() });
+    const [checkouts, onlineOrders] = await Promise.all([listUnpaidCodCheckouts(), listOnlineLeadOrders()]);
+    return res.json({ success: true, checkouts, online_orders: onlineOrders });
   } catch (error) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
     console.error("Unpaid COD checkouts error:", error);

@@ -42,6 +42,7 @@ import crypto from "node:crypto";
 import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSafety.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
 import { isCodAdvanceFeeRequired } from "../services/codAdvanceService.js";
+import { onlineLeadPredicate } from "../services/leads.js";
 
 const ALLOWED_ORDER_STATUSES = [
   "New",
@@ -309,12 +310,13 @@ async function loadOrdersForAdmin(adminId, { all = false } = {}) {
     const result = await query(
       `SELECT o.*, (aov.order_id IS NOT NULL) AS is_seen, aov.first_viewed_at, aov.last_viewed_at
        FROM orders o LEFT JOIN admin_order_views aov ON aov.order_id = o.id AND aov.admin_id = ?
+       WHERE NOT ${onlineLeadPredicate("o")}
        ORDER BY o.created_at DESC, o.id DESC${limitClause}`, [adminId]
     );
     rows = result.rows;
   } catch (joinError) {
     if (joinError?.code !== "ER_NO_SUCH_TABLE" || !String(joinError?.message || "").includes("admin_order_views")) throw joinError;
-    rows = (await query(`SELECT o.*, 0 AS is_seen, NULL AS first_viewed_at, NULL AS last_viewed_at FROM orders o ORDER BY o.created_at DESC, o.id DESC${limitClause}`)).rows;
+    rows = (await query(`SELECT o.*, 0 AS is_seen, NULL AS first_viewed_at, NULL AS last_viewed_at FROM orders o WHERE NOT ${onlineLeadPredicate("o")} ORDER BY o.created_at DESC, o.id DESC${limitClause}`)).rows;
   }
   return (await attachCancellationFlags(await attachLatestShipments(rows))).map(withDisplayStatuses);
 }

@@ -5,6 +5,7 @@
 
 import { query } from "../config/db.js";
 import { countDeletedOrders } from "../services/deletedOrdersService.js";
+import { onlineLeadPredicate } from "../services/leads.js";
 
 function emptyAnalysis(from = null, to = null) {
   return {
@@ -309,7 +310,8 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const shipmentsSelect = includeShipmentsTable
     ? "s.waybill_number AS shipment_waybill_number, s.fulfillment_status AS shipment_fulfillment_status, s.shipment_status AS shipment_tracking_status,"
     : "";
-  const unseenPredicate = includeViews ? "is_seen = 0" : "FALSE";
+  // Unpaid online orders live on the Leads page, so they do not count as unseen orders.
+  const unseenPredicate = includeViews ? `is_seen = 0 AND NOT ${onlineLeadPredicate("o")}` : "FALSE";
   const revenueExpr = revenueExpression(columns);
   const paidDateExpr = paidDateExpression(columns);
   const createdDateExpr = createdDateExpression(columns);
