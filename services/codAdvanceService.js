@@ -370,10 +370,23 @@ export async function markCodAdvanceRefunded(attemptId, note) {
 }
 
 /**
- * COD checkouts where the customer filled in the address but never paid the ₹99
- * (closed the Razorpay window or the payment failed). No order row exists for
- * these. Shown read-only in the admin Orders list so the team can follow up.
+ * Leads start date: older unpaid checkouts are never shown.
+ * Override with LEADS_START_AT (ISO date-time, e.g. 2026-10-29T13:00:00+05:30).
+ */
+export const DEFAULT_LEADS_START_AT = "2026-10-29T13:00:00+05:30";
+
+export function leadsStartEpochSeconds() {
+  const parsed = Date.parse(String(process.env.LEADS_START_AT || DEFAULT_LEADS_START_AT).trim());
+  const fallback = Date.parse(DEFAULT_LEADS_START_AT);
+  return Math.floor((Number.isFinite(parsed) ? parsed : fallback) / 1000);
+}
+
+/**
+ * Leads: COD checkouts where the customer filled in the address but never paid
+ * the ₹99 (closed the Razorpay window or the payment failed). No order row
+ * exists for these. Shown read-only in the admin Leads page for follow-up.
  *
+ * - Only checkouts started on/after the leads start date.
  * - One row per phone number (the latest attempt).
  * - Skipped once that phone has placed any order after the attempt.
  */
@@ -393,6 +406,7 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
      FROM cod_advance_payments cap
      WHERE cap.order_id IS NULL
        AND cap.status IN ('created', 'failed')
+       AND UNIX_TIMESTAMP(cap.created_at) >= ?
        AND NOT EXISTS (
          SELECT 1 FROM orders o
          WHERE o.phone = JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone'))
@@ -400,7 +414,7 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
        )
      ORDER BY cap.created_at DESC, cap.id DESC
      LIMIT ?`,
-    [Number(limit) || 500]
+    [leadsStartEpochSeconds(), Number(limit) || 500]
   );
 
   const seenPhones = new Set();

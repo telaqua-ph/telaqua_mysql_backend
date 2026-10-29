@@ -1,13 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../config/db.js";
-import { listUnpaidCodCheckouts } from "../services/codAdvanceService.js";
+import { leadsStartEpochSeconds, listUnpaidCodCheckouts } from "../services/codAdvanceService.js";
 
 test("unpaid COD checkouts: one latest row per phone, JSON nulls cleaned", async () => {
   const original = pool.query;
   let seenSql = "";
-  pool.query = async (sql) => {
+  let seenParams = [];
+  pool.query = async (sql, params) => {
     seenSql = String(sql);
+    seenParams = params;
     // Rows arrive newest first, as the SQL orders them.
     return {
       rows: [
@@ -28,7 +30,24 @@ test("unpaid COD checkouts: one latest row per phone, JSON nulls cleaned", async
     assert.match(seenSql, /order_id IS NULL/);
     assert.match(seenSql, /status IN \('created', 'failed'\)/);
     assert.match(seenSql, /NOT EXISTS/);
+    assert.match(seenSql, /UNIX_TIMESTAMP\(cap.created_at\) >= \?/);
+    assert.equal(seenParams[0], leadsStartEpochSeconds());
   } finally {
     pool.query = original;
+  }
+});
+
+test("leads start date defaults to 29 Oct 2026 1:00 PM IST and can be overridden", () => {
+  const saved = process.env.LEADS_START_AT;
+  try {
+    delete process.env.LEADS_START_AT;
+    assert.equal(leadsStartEpochSeconds(), Date.parse("2026-10-29T07:30:00Z") / 1000);
+    process.env.LEADS_START_AT = "2026-11-01T00:00:00+05:30";
+    assert.equal(leadsStartEpochSeconds(), Date.parse("2026-10-31T18:30:00Z") / 1000);
+    process.env.LEADS_START_AT = "not a date";
+    assert.equal(leadsStartEpochSeconds(), Date.parse("2026-10-29T07:30:00Z") / 1000);
+  } finally {
+    if (saved === undefined) delete process.env.LEADS_START_AT;
+    else process.env.LEADS_START_AT = saved;
   }
 });

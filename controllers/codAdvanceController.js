@@ -160,7 +160,7 @@ export async function listCodAdvanceIssuesHandler(req, res) {
   }
 }
 
-/** GET /api/orders/cod-advance/unpaid (admin) — COD checkouts left without paying the ₹99. */
+/** GET /api/orders/cod-advance/unpaid (admin) — Leads: COD checkouts left without paying the ₹99. */
 export async function listUnpaidCodCheckoutsHandler(req, res) {
   try {
     return res.json({ success: true, checkouts: await listUnpaidCodCheckouts() });
