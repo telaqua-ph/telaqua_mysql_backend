@@ -3,6 +3,7 @@ import { getShipwayConfig } from "../config/shipwayConfig.js";
 const ENDPOINT = "https://app.shipway.com/api/v2orders";
 const GET_ORDERS_ENDPOINT = "https://app.shipway.com/api/getorders";
 const GET_CARRIERS_ENDPOINT = "https://app.shipway.com/api/getcarrier";
+const PINCODE_SERVICEABILITY_ENDPOINT = "https://app.shipway.com/api/pincodeserviceable";
 const TIMEOUT_MS = 20_000;
 
 const messageOf = (body, fallback) => String(body?.message || body?.error || body?.errors?.[0]?.message || fallback).replace(/[\r\n]+/g, " ").slice(0, 900);
@@ -206,6 +207,138 @@ export async function resolveShipwayCarrier() {
   }
   const carrier = carriers[0];
   return { carrierId: carrier.id, carrierName: carrier.name || carrier.title || null, source: "shipway" };
+}
+
+/* ---------------------------------------------------------------------------
+ * Courier priority + fallback.
+ * Ship Order tries couriers in this order: SHIPWAY_CARRIER_PRIORITY (default
+ * "amazon,ekart surface"), then every other active Shipway courier.
+ * ------------------------------------------------------------------------- */
+
+export const DEFAULT_CARRIER_PRIORITY = "amazon,ekart surface";
+
+const carrierLabel = (carrier) => `${carrier?.name || ""} ${carrier?.title || ""}`.toLowerCase();
+
+/** "ekart surface" matches a courier whose name/title contains both "ekart" and "surface". */
+function carrierMatchesTerm(carrier, term) {
+  const words = term.toLowerCase().split(/[\s_-]+/).filter(Boolean);
+  const label = carrierLabel(carrier);
+  return words.length > 0 && words.every((word) => label.includes(word));
+}
+
+/** Order active carriers: priority terms first (in the order given), then the rest as Shipway lists them. */
+export function rankShipwayCarriers(carriers, priority = process.env.SHIPWAY_CARRIER_PRIORITY) {
+  const terms = String(priority ?? "").trim() ? String(priority).split(",") : DEFAULT_CARRIER_PRIORITY.split(",");
+  const ranked = [];
+  const seen = new Set();
+  for (const term of terms.map((item) => item.trim()).filter(Boolean)) {
+    const matches = carriers.filter((carrier) => !seen.has(carrier.id) && carrierMatchesTerm(carrier, term));
+    // Within one term, prefer a "surface" variant (e.g. "Amazon Surface" over "Amazon Air") unless the term names a mode.
+    if (!/surface|air|express/i.test(term)) matches.sort((a, b) => Number(/surface/.test(carrierLabel(b))) - Number(/surface/.test(carrierLabel(a))));
+    for (const carrier of matches) { seen.add(carrier.id); ranked.push(carrier); }
+  }
+  for (const carrier of carriers) if (!seen.has(carrier.id)) { seen.add(carrier.id); ranked.push(carrier); }
+  return ranked;
+}
+
+function collectCarrierIds(value, ids, depth = 0) {
+  if (!value || depth > 6 || typeof value !== "object") return;
+  if (Array.isArray(value)) { value.forEach((item) => collectCarrierIds(item, ids, depth + 1)); return; }
+  for (const key of ["carrier_id", "courier_id", "id"]) {
+    const id = String(value[key] ?? "").trim();
+    if (/^\d+$/.test(id) && Number(id) > 0) { ids.add(id); break; }
+  }
+  for (const item of Object.values(value)) if (item && typeof item === "object") collectCarrierIds(item, ids, depth + 1);
+}
+
+/**
+ * Best-effort, read-only pincode check. Returns a Set of carrier IDs Shipway says can
+ * deliver to the pincode, or null when the answer is unknown (any error or unrecognised
+ * body). null never blocks booking; the per-courier fallback still applies.
+ */
+export async function getShipwayServiceableCarrierIds(pincode, { cod = false, timeoutMs = 8000 } = {}) {
+  const pin = String(pincode ?? "").trim();
+  if (!/^\d{6}$/.test(pin)) return null;
+  try {
+    const config = getShipwayConfig();
+    const authorization = Buffer.from(`${config.email}:${config.licenseKey}`, "utf8").toString("base64");
+    const url = new URL(PINCODE_SERVICEABILITY_ENDPOINT);
+    url.searchParams.set("pincode", pin);
+    if (cod) url.searchParams.set("payment_type", "C");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(url, { headers: { Authorization: `Basic ${authorization}`, Accept: "application/json" }, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response?.ok) return null;
+    const body = await response.json().catch(() => null);
+    if (!body || [0, "0", false].includes(body.success)) return null;
+    const ids = new Set();
+    collectCarrierIds(body.message ?? body.data ?? body, ids);
+    return ids.size ? ids : null;
+  } catch (error) {
+    console.warn("[Shipway] Pincode serviceability check skipped", { message: error?.message });
+    return null;
+  }
+}
+
+/**
+ * Ordered list of carriers to try for one order. Serviceable carriers keep their
+ * priority position; carriers Shipway says cannot serve the pincode are dropped,
+ * but only when the check actually recognised at least one active carrier.
+ */
+export async function resolveShipwayCarrierCandidates({ pincode = null, cod = false } = {}) {
+  const carriers = await getShipwayCarriers();
+  if (!carriers.length) {
+    const error = new Error("Shipway: No active Shipway carrier/courier is configured on this account, so the shipment was not booked. Please activate a courier and courier priority rule in Shipway, then retry.");
+    error.code = "SHIPWAY_NO_CARRIER";
+    throw error;
+  }
+  if (String(process.env.SHIPWAY_CARRIER_ID || "").trim()) {
+    console.warn("[Shipway] SHIPWAY_CARRIER_ID is ignored for Ship Order; SHIPWAY_CARRIER_PRIORITY decides the courier order.");
+  }
+  const ranked = rankShipwayCarriers(carriers);
+  const serviceable = pincode ? await getShipwayServiceableCarrierIds(pincode, { cod }) : null;
+  const filtered = serviceable ? ranked.filter((carrier) => serviceable.has(carrier.id)) : [];
+  const list = filtered.length ? filtered : ranked;
+  return list.map((carrier) => ({ carrierId: carrier.id, carrierName: carrier.name || carrier.title || null, source: filtered.length ? "serviceable" : "priority" }));
+}
+
+const COURIER_UNAVAILABLE_PATTERN = /no shipping services available|A-306|not serviceable|non[- ]?serviceable|unserviceable|serviceability|pincode is not|pin ?code not|no courier found|carrier_id does not exist|courier (?:is )?not available|carrier unavailable|courier unavailable/i;
+
+function errorTexts(error) {
+  const body = error?.upstreamBody;
+  const awbResponse = body?.awb_response;
+  // Upstream Shipway text only: our own wrapper messages always say "not assigned yet".
+  return [body?.message, body?.error,
+    typeof awbResponse === "string" ? awbResponse : awbResponse?.message, awbResponse?.error]
+    .filter((value) => typeof value === "string");
+}
+
+/**
+ * True when Shipway refused this specific courier (cannot serve the address) and no
+ * AWB/label was produced, so trying the next courier cannot create a second shipment.
+ * Timeouts and ambiguous outcomes are never treated as a courier refusal.
+ */
+export function isShipwayCourierUnavailable(error) {
+  if (!error || error.code === "SHIPWAY_OUTCOME_UNKNOWN") return false;
+  const body = error.upstreamBody;
+  if (valueOf(body, ["AWB", "awb", "awb_number", "tracking_number"]) || valueOf(body, ["shipping_url", "label_url", "shipping_label_url"])) return false;
+  if (error.code === "SHIPWAY_PARTIAL_OR_REJECTED") {
+    return Boolean(error.noCourier) || errorTexts(error).some((text) => COURIER_UNAVAILABLE_PATTERN.test(text));
+  }
+  if (error.code === "SHIPWAY_UPSTREAM_ERROR" && [400, 409, 422].includes(error.status)) {
+    return errorTexts(error).some((text) => COURIER_UNAVAILABLE_PATTERN.test(text));
+  }
+  return false;
+}
+
+/** Shipway refused a re-push because the order id is already present. */
+export function isShipwayDuplicateOrderResponse(error) {
+  return errorTexts(error).some((text) => /already exists?|duplicate order|order id exists/i.test(text));
 }
 
 /** Read-only reconciliation. It never creates, modifies, or cancels a Shipway order. */

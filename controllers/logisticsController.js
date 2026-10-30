@@ -30,11 +30,11 @@ import {
   buildShipmentStatusFlags,
   isStatusEventCurrent,
 } from "../services/delhiveryWebhookService.js";
-import { canFulfillOrder } from "../services/paymentMode.js";
+import { canFulfillOrder, isCodOrder } from "../services/paymentMode.js";
 import { buildShipmentPayload } from "../services/shipmentPayload.js";
 import { safeDelhiveryError } from "../lib/delhiveryDbDiagnostics.js";
 import { buildShipwayPayload } from "../services/shipwayPayload.js";
-import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection, isHttpUrl, resolveShipwayCarrier } from "../services/shipwayService.js";
+import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingRejection, isHttpUrl, isShipwayCourierUnavailable, isShipwayDuplicateOrderResponse, NO_COURIER_GUIDANCE, resolveShipwayCarrierCandidates } from "../services/shipwayService.js";
 import { DELHIVERY_ONLY_SQL, assertDelhiveryManagedShipment, isShipwayShipment } from "../services/shipmentProvider.js";
 import { recordShipwayTrackingFailure, refreshShipwayShipment } from "../services/shipwayTrackingSyncService.js";
 import { safeShipwayTrackingError } from "../services/shipwayService.js";
@@ -601,6 +601,16 @@ export async function reconcileOrderShipment(req, res) {
 
 const LATE_AWB_DELAYS_MS = [3000, 5000];
 
+/** A previous attempt ended because the courier could not serve the address (Shipway "Assignment Failed"). */
+const PREVIOUS_COURIER_FAILURE = /cannot deliver to this address|no shipping services available|A-306|not serviceable|no courier found|No courier could deliver/i;
+function previousAttemptWasCourierRefusal(shipment) {
+  return String(shipment?.shipment_status || "") === "Booking Failed" || PREVIOUS_COURIER_FAILURE.test(String(shipment?.last_error || ""));
+}
+
+const describeAttempts = (attempts) => attempts.map((item) => `${item.carrierName || `carrier ${item.carrierId}`} (${item.reason})`).join("; ");
+const shortReason = (error) => String(error?.upstreamBody?.awb_response?.message || (typeof error?.upstreamBody?.awb_response === "string" ? error.upstreamBody.awb_response : "") ||
+  error?.upstreamBody?.message || error?.message || "refused").replace(/[\r\n]+/g, " ").replace(/^Shipway:\s*/, "").slice(0, 160);
+
 /** Read-only: poll Shipway briefly for an AWB assigned just after the order was created. */
 async function fetchLateShipwayAwb(order) {
   for (const delay of LATE_AWB_DELAYS_MS) {
@@ -673,7 +683,10 @@ export async function createOrderShipment(req, res) {
       await recordShipmentError(shipment.id, error);
       return apiError(res, error, "Shipway lookup failed; the shipment was not booked.");
     }
-    if (lookup.state !== "confirmed_absent") {
+    // Shipway holds the order with no courier (Assignment Failed): continue below and
+    // re-push it with the next courier in priority. Anything else is never re-booked.
+    const unassignedAfterCourierRefusal = lookup.state === "exists" && !lookup.awb && !lookup.labelUrl && previousAttemptWasCourierRefusal(shipment);
+    if (lookup.state !== "confirmed_absent" && !unassignedAfterCourierRefusal) {
       try {
         const result = hasShipwayArtifacts(lookup)
           ? await saveExistingShipwayBooking(order, shipment, lookup, token, req)
@@ -686,12 +699,47 @@ export async function createOrderShipment(req, res) {
     }
   }
 
+  // Courier fallback: SHIPWAY_CARRIER_PRIORITY (default Amazon, then Ekart Surface), then
+  // every other active courier. Move on only when Shipway clearly refused that courier
+  // and produced no AWB/label; timeouts and ambiguous responses stop immediately.
+  const attempts = [];
   try {
-    const carrier = await resolveShipwayCarrier();
-    const payload = buildShipwayPayload(order, getTelaquaProductDefaults(), { carrierId: carrier.carrierId });
-    const { body: data, booking } = await createShipwayShipment(payload);
-    booking.carrierId = booking.carrierId || carrier.carrierId;
-    booking.carrierName = booking.carrierName || carrier.carrierName;
+    const candidates = await resolveShipwayCarrierCandidates({ pincode: order.pincode, cod: isCodOrder(order) });
+    let data;
+    let booking;
+    for (let index = 0; index < candidates.length && !booking; index += 1) {
+      const carrier = candidates[index];
+      if (index > 0) {
+        // Read-only guard: if a courier was assigned after all, save it instead of booking again.
+        const lookup = await findShipwayOrder(shipwayOrderNumber(order), { timeoutMs: 8000 });
+        if (hasShipwayArtifacts(lookup)) {
+          const result = await saveExistingShipwayBooking(order, shipment, lookup, token, req);
+          return res.status(result.success ? 201 : result.status).json({ ...result, courier_attempts: attempts });
+        }
+      }
+      try {
+        const payload = buildShipwayPayload(order, getTelaquaProductDefaults(), { carrierId: carrier.carrierId });
+        ({ body: data, booking } = await createShipwayShipment(payload));
+        booking.carrierId = booking.carrierId || carrier.carrierId;
+        booking.carrierName = booking.carrierName || carrier.carrierName;
+      } catch (error) {
+        const unavailable = isShipwayCourierUnavailable(error);
+        if (unavailable) attempts.push({ carrierId: carrier.carrierId, carrierName: carrier.carrierName, reason: shortReason(error) });
+        if (!unavailable || index === candidates.length - 1) {
+          if (unavailable) {
+            error.courierRefused = true;
+            error.message = `Shipway: No courier could deliver order ${shipwayOrderNumber(order)} to pincode ${order.pincode}. Tried: ${describeAttempts(attempts)}. To ship it, ${NO_COURIER_GUIDANCE} that covers this pincode (or assign a courier to it in Shipway), then retry.`;
+          } else if (attempts.length) {
+            error.message = `${error.message} Couriers tried before: ${describeAttempts(attempts)}.`;
+          }
+          if (isShipwayDuplicateOrderResponse(error)) {
+            error.message += " Shipway kept the earlier order: assign a courier to it in Shipway (or cancel it there), then press Retry.";
+          }
+          throw error;
+        }
+        console.info("[Shipway] Courier refused the order; trying the next courier", { order: shipwayOrderNumber(order), carrier: carrier.carrierName, carrierId: carrier.carrierId, next: candidates[index + 1]?.carrierName });
+      }
+    }
     await pool.query(
       `UPDATE shipments SET provider='Shipway', courier_name=?, carrier_id=?, waybill_number=?, fulfillment_status='ready_to_ship', shipment_status='Ready to Ship',
        shipment_created_at=NOW(), shipping_label_url=?, label_status='Generated', label_generated_at=NOW(), shipment_response=?, label_response=?,
@@ -699,12 +747,17 @@ export async function createOrderShipment(req, res) {
       [booking.carrierName || "Shipway", booking.carrierId, booking.awb, booking.labelUrl, asJson(data), asJson(data.awb_response), shipment.id, token]
     );
     await pool.query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [orderId]);
-    await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl }, pool);
-    return res.status(201).json({ success: true, message: "Shipment is Ready to Ship.", shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, data });
+    await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl, courierAttempts: attempts }, pool);
+    return res.status(201).json({
+      success: true,
+      message: attempts.length ? `Shipment is Ready to Ship with ${booking.carrierName || "the next courier"} (skipped: ${describeAttempts(attempts)}).` : "Shipment is Ready to Ship.",
+      shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, courier: booking.carrierName, courier_attempts: attempts, data,
+    });
   } catch (error) {
     // Shipway created the order but assigns the courier/AWB a few seconds later.
     // Look it up (read-only, never books) and save the AWB + label if it is ready now.
-    if (error?.shipwayOrderCreated) {
+    // Skip when every courier explicitly refused: each refusal was already checked read-only.
+    if (error?.shipwayOrderCreated && !error.courierRefused) {
       const late = await fetchLateShipwayAwb(order);
       if (late) {
         try {

@@ -168,3 +168,22 @@ test("Shipway order created without AWB is flagged so the late AWB can be fetche
       !/added successfully/.test(error.message)
   );
 });
+
+test("courier priority: Amazon, then Ekart Surface, then the rest; SHIPWAY_CARRIER_PRIORITY overrides", async () => {
+  const { rankShipwayCarriers, isShipwayCourierUnavailable } = await import("../services/shipwayService.js");
+  const carriers = [
+    { id: "1", name: "Delhivery", title: "Delhivery Surface" },
+    { id: "2", name: "Ekart", title: "Ekart Air" },
+    { id: "3", name: "Ekart", title: "Ekart Surface" },
+    { id: "4", name: "Amazon Shipping", title: "Amazon" },
+  ];
+  assert.deepEqual(rankShipwayCarriers(carriers, "").map((c) => c.id), ["4", "3", "1", "2"]);
+  assert.deepEqual(rankShipwayCarriers(carriers, "delhivery,amazon").map((c) => c.id), ["1", "4", "2", "3"]);
+  assert.deepEqual(rankShipwayCarriers(carriers, "bluedart").map((c) => c.id), ["1", "2", "3", "4"]);
+
+  const refused = { code: "SHIPWAY_PARTIAL_OR_REJECTED", upstreamBody: { success: true, awb_response: { success: false, message: "Pincode not serviceable" } } };
+  assert.equal(isShipwayCourierUnavailable(refused), true);
+  assert.equal(isShipwayCourierUnavailable({ code: "SHIPWAY_OUTCOME_UNKNOWN" }), false);
+  assert.equal(isShipwayCourierUnavailable({ code: "SHIPWAY_PARTIAL_OR_REJECTED", upstreamBody: { success: true, awb_response: { success: false, message: "Pincode not serviceable", AWB: "X1" } } }), false);
+  assert.equal(isShipwayCourierUnavailable({ code: "SHIPWAY_PARTIAL_OR_REJECTED", upstreamBody: { success: true, message: "Order has been added successfully" } }), false);
+});

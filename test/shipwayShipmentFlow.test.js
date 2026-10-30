@@ -133,9 +133,13 @@ async function withHarness({ db, responses = [] }, body) {
     const href = String(url);
     calls.push({ url: href, method: request.method || "GET", body: request.body ? JSON.parse(request.body) : null });
     const carrierLookup = /\/api\/getcarrier$/.test(href);
+    const pincodeLookup = /\/api\/pincodeserviceable\?/.test(href);
     const next = carrierLookup && !responses[0]?.match?.test(href)
       ? { match: /\/api\/getcarrier$/, body: { success: 1, message: [{ id: "3411", name: "Delhivery Surface" }] } }
-      : responses.shift();
+      // Pincode check is best-effort; unless a test queues one, answer "unknown" (no filtering).
+      : pincodeLookup && !responses[0]?.match?.test(href)
+        ? { match: /\/api\/pincodeserviceable\?/, body: { success: 0, message: "not available" } }
+        : responses.shift();
     if (!next) throw new Error(`Unexpected outbound request: ${href.replace(/\?.*/, "")}`);
     assert.match(href, next.match, "outbound request went to the wrong Shipway endpoint");
     return new Response(JSON.stringify(next.body), { status: next.status || 200 });
@@ -264,7 +268,7 @@ test("successful booking saves provider, carrier, AWB, label and Ready to Ship; 
     assert.equal(second.statusCode, 200);
     assert.equal(second.body.already_created, true);
     assert.equal(second.body.waybill, "SW900873");
-    assert.equal(calls.length, 2, "only the first click may call Shipway");
+    assert.equal(calls.length, 3, "only the first click may call Shipway (getcarrier, pincodeserviceable, v2orders)");
 
     const verification = logs.find(([label]) => label === "[Shipway] outgoing booking verification");
     assert.equal(verification[1].autoAssignment, false);
@@ -296,7 +300,7 @@ test("rejected booking saves nothing, releases the lock, and a retry looks up th
 
     const retry = await call(createOrderShipment, { params: { orderId: "873" } });
     assert.equal(retry.statusCode, 201, JSON.stringify(retry.body));
-    assert.deepEqual(calls.map((entry) => entry.url.replace(/\?.*/, "").split("/").at(-1)), ["getcarrier", "v2orders", "getorders", "getcarrier", "v2orders"]);
+    assert.deepEqual(calls.map((entry) => entry.url.replace(/\?.*/, "").split("/").at(-1)), ["getcarrier", "pincodeserviceable", "v2orders", "getorders", "getcarrier", "pincodeserviceable", "v2orders"]);
     assert.equal(shipment.processing_token, null);
     assert.equal(db.shipments.get(shipment.id).waybill_number, "SW900873");
     assertNoSecrets(logs);
@@ -483,4 +487,112 @@ test("scheduled Delhivery tracking sync excludes Shipway shipments", async () =>
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../services/logisticsSyncService.js", import.meta.url), "utf8");
   assert.match(source, /AND \$\{DELHIVERY_ONLY_SQL\}/);
+});
+
+/* ---------- Courier priority fallback: Amazon -> Ekart Surface -> any active courier ---------- */
+
+const PRIORITY_CARRIERS = getcarrier({ success: 1, message: [
+  { id: "3411", name: "Delhivery Surface" },
+  { id: "2", name: "Ekart Air" },
+  { id: "5", name: "Ekart Surface" },
+  { id: "7", name: "Amazon Shipping" },
+] });
+const NOT_SERVICEABLE = { success: true, message: "Order has been added successfully", awb_response: { success: false, message: "No shipping services available for this pincode (A-306)" } };
+const UNASSIGNED = { success: 1, message: [{ order_id: "TAQ-000873", shipment_status: "Assignment Failed" }] };
+const bookedWith = (id, name) => ({ success: true, message: "Order created", awb_response: { success: true, AWB: `AWB${id}`, carrier_id: id, carrier_name: name, shipping_url: `https://labels.example/AWB${id}.pdf` } });
+const bookedCarrierIds = (calls) => calls.filter((entry) => /v2orders$/.test(entry.url)).map((entry) => entry.body.carrier_id);
+
+test("Ship Order books Amazon first when Amazon accepts", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  await withHarness({ db, responses: [PRIORITY_CARRIERS, v2orders(bookedWith(7, "Amazon Shipping"))] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.deepEqual(bookedCarrierIds(calls), [7]);
+    assert.equal([...db.shipments.values()][0].courier_name, "Amazon Shipping");
+    assert.deepEqual(res.body.courier_attempts, []);
+  });
+});
+
+test("Amazon cannot deliver -> Ekart Surface is booked (Ekart Air is not preferred)", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  await withHarness({ db, responses: [PRIORITY_CARRIERS, v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(bookedWith(5, "Ekart Surface"))] }, async ({ calls, logs }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.deepEqual(bookedCarrierIds(calls), [7, 5]);
+    const [shipment] = db.shipments.values();
+    assert.equal(shipment.courier_name, "Ekart Surface");
+    assert.equal(shipment.waybill_number, "AWB5");
+    assert.equal(shipment.shipment_status, "Ready to Ship");
+    assert.equal(res.body.courier_attempts[0].carrierName, "Amazon Shipping");
+    assert.match(res.body.message, /Ekart Surface.*skipped: Amazon Shipping/);
+    assertNoSecrets(logs);
+  });
+});
+
+test("Amazon and Ekart Surface cannot deliver -> next active courier is booked", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  await withHarness({ db, responses: [
+    PRIORITY_CARRIERS,
+    v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED),
+    v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED),
+    v2orders(bookedWith(3411, "Delhivery Surface")),
+  ] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.deepEqual(bookedCarrierIds(calls), [7, 5, 3411]);
+    assert.equal([...db.shipments.values()][0].courier_name, "Delhivery Surface");
+  });
+});
+
+test("if a refused courier was assigned after all, it is saved and nothing is booked again", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  const lateAssigned = { success: 1, message: [{ order_id: "TAQ-000873", awb: "AMZ1", carrier_id: "7", courier_name: "Amazon Shipping", shipping_url: "https://labels.example/AMZ1.pdf" }] };
+  await withHarness({ db, responses: [PRIORITY_CARRIERS, v2orders(NOT_SERVICEABLE), getorders(lateAssigned)] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.deepEqual(bookedCarrierIds(calls), [7]);
+    assert.equal([...db.shipments.values()][0].waybill_number, "AMZ1");
+  });
+});
+
+test("no courier can deliver -> Booking Failed listing every courier tried; Retry runs the fallback again", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  const carriers = getcarrier({ success: 1, message: [{ id: "5", name: "Ekart Surface" }, { id: "7", name: "Amazon Shipping" }] });
+  await withHarness({ db, responses: [
+    carriers, v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(NOT_SERVICEABLE),
+    // Retry: Shipway still holds the unassigned order, so the fallback runs again.
+    getorders(UNASSIGNED), carriers, v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(bookedWith(5, "Ekart Surface")),
+  ] }, async ({ calls }) => {
+    const failed = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(failed.statusCode, 422, JSON.stringify(failed.body));
+    assert.match(failed.body.message, /No courier could deliver order TAQ-000873 to pincode 560001/);
+    assert.match(failed.body.message, /Amazon Shipping \(.*A-306.*\); Ekart Surface/);
+    const [shipment] = db.shipments.values();
+    assert.equal(shipment.shipment_status, "Booking Failed");
+    assert.equal(shipment.processing_token, null);
+
+    const retry = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(retry.statusCode, 201, JSON.stringify(retry.body));
+    assert.deepEqual(bookedCarrierIds(calls), [7, 5, 7, 5]);
+    assert.equal(db.shipments.get(shipment.id).courier_name, "Ekart Surface");
+  });
+});
+
+test("pincode check skips couriers that cannot serve the pincode before booking", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  const serviceable = { match: /\/api\/pincodeserviceable\?pincode=560001&payment_type=C$/, body: { success: 1, message: [{ carrier_id: "5", name: "Ekart Surface" }, { carrier_id: "3411", name: "Delhivery Surface" }] } };
+  await withHarness({ db, responses: [PRIORITY_CARRIERS, serviceable, v2orders(bookedWith(5, "Ekart Surface"))] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.deepEqual(bookedCarrierIds(calls), [5]);
+  });
+});
+
+test("a server error or uncertain outcome never falls back to another courier", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  await withHarness({ db, responses: [PRIORITY_CARRIERS, v2orders({ success: false, message: "Internal error" }, 500)] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.notEqual(res.statusCode, 201);
+    assert.deepEqual(bookedCarrierIds(calls), [7]);
+  });
 });
