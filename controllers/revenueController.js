@@ -66,6 +66,32 @@ function confirmedPredicate(columns) {
   )`;
 }
 
+/**
+ * Paid ₹99 COD advance delivery charges. The ₹99 is collected online (Razorpay)
+ * when the COD order is placed and is non-refundable, so it is revenue received
+ * on the day it was verified, even while the product amount is still pending.
+ * It is stored separately (cod_advance_fee) from the product amount
+ * (final_total), so the two are never double counted.
+ */
+export function codAdvanceSelect(columns) {
+  if (!columns.has("cod_advance_fee") || !columns.has("cod_advance_status")) {
+    return "SELECT NULL AS id, NULL AS order_number, 0 AS amount, NULL AS accounting_at, 'Razorpay' AS payment_mode, '' AS payment_status, 'advance' AS bucket FROM DUAL WHERE FALSE";
+  }
+  const createdAt = columns.has("created_at") ? "created_at" : "NULL";
+  const paidAt = columns.has("cod_advance_verified_at")
+    ? `COALESCE(cod_advance_verified_at, ${createdAt})`
+    : createdAt;
+  const testFilter = columns.has("is_test_order") ? "AND COALESCE(is_test_order, 0) = 0" : "";
+  const orderNumber = columns.has("order_number") ? "order_number" : "NULL";
+  return `SELECT id, ${orderNumber} AS order_number, COALESCE(cod_advance_fee, 0) AS amount,
+      ${paidAt} AS accounting_at, 'Razorpay' AS payment_mode,
+      'Advance Paid' AS payment_status, 'advance' AS bucket
+    FROM orders
+    WHERE LOWER(TRIM(COALESCE(cod_advance_status, ''))) = 'paid'
+      AND COALESCE(cod_advance_fee, 0) > 0
+      ${testFilter}`;
+}
+
 function istDayExpression(timestamp) {
   return `TIMESTAMPADD(MINUTE, TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()) + 330, ${timestamp})`;
 }
@@ -103,6 +129,8 @@ export async function getRevenueReport(req, res) {
         FROM orders
         WHERE ${cod} AND ${confirmed} AND ${paymentStatus} = 'Pending'
           ${testFilter}
+      ), cod_advance AS (
+        ${codAdvanceSelect(columns)}
       ), contributing AS (
         SELECT * FROM received
         WHERE accounting_at >= ${istStart("?")}
@@ -111,12 +139,16 @@ export async function getRevenueReport(req, res) {
         SELECT * FROM pending_cod
         WHERE accounting_at >= ${istStart("?")}
           AND accounting_at < DATE_ADD(${istStart("?")}, INTERVAL 1 DAY)
+        UNION ALL
+        SELECT * FROM cod_advance
+        WHERE accounting_at >= ${istStart("?")}
+          AND accounting_at < DATE_ADD(${istStart("?")}, INTERVAL 1 DAY)
       )
       SELECT id, order_number, amount, accounting_at, payment_mode, payment_status, bucket,
         DATE_FORMAT(${istDayExpression("accounting_at")}, '%Y-%m-%d') AS accounting_date
       FROM contributing
       ORDER BY accounting_at DESC, id DESC`,
-      [from, to, from, to]
+      [from, to, from, to, from, to]
     );
 
     const report = {
@@ -124,6 +156,7 @@ export async function getRevenueReport(req, res) {
       pendingCodRevenue: 0,
       razorpayRevenue: 0,
       codRevenue: 0,
+      codAdvanceRevenue: 0,
       daily: {},
       orders: [],
     };
@@ -131,9 +164,13 @@ export async function getRevenueReport(req, res) {
       const amountValue = Number(row.amount || 0);
       const item = { ...row, amount: amountValue };
       report.orders.push(item);
-      if (row.bucket === "received") {
+      if (row.bucket === "received" || row.bucket === "advance") {
         report.receivedRevenue += amountValue;
-        if (row.payment_mode === "COD") report.codRevenue += amountValue;
+        if (row.bucket === "advance") {
+          // ₹99 COD advance: paid online through Razorpay.
+          report.codAdvanceRevenue += amountValue;
+          report.razorpayRevenue += amountValue;
+        } else if (row.payment_mode === "COD") report.codRevenue += amountValue;
         else report.razorpayRevenue += amountValue;
         const day = row.accounting_date;
         report.daily[day] = (report.daily[day] || 0) + amountValue;
@@ -151,6 +188,7 @@ export async function getRevenueReport(req, res) {
       pendingCodRevenue: report.pendingCodRevenue,
       razorpayRevenue: report.razorpayRevenue,
       codRevenue: report.codRevenue,
+      codAdvanceRevenue: report.codAdvanceRevenue,
       daily: Object.entries(report.daily).map(([date, amount]) => ({ date, amount })),
       orders: report.orders,
     });

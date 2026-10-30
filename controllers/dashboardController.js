@@ -293,9 +293,10 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const includeShipmentsTable = await hasShipmentsTable();
   const includeInventoryHistory = await hasInventoryHistoryTable();
   const analysisParams = [
-    from, from, to, to,
-    from, from, to, to,
-    from, from, to, to,
+    from, from, to, to, // devices sold
+    from, from, to, to, // paid orders revenue
+    from, from, to, to, // paid ₹99 COD advances
+    from, from, to, to, // pending COD revenue
   ];
   const unseenJoin = includeViews
     ? `LEFT JOIN admin_order_views aov
@@ -374,6 +375,14 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const paidTestFilter = columns.has("is_test_order")
     ? "AND COALESCE(is_test_order, 0) = 0"
     : "";
+  const codAdvanceCte = columns.has("cod_advance_fee") && columns.has("cod_advance_status")
+    ? `SELECT COALESCE(cod_advance_fee, 0) AS advance_amount,
+         ${columns.has("cod_advance_verified_at") ? `COALESCE(cod_advance_verified_at, ${createdDateExpr})` : createdDateExpr} AS advance_paid_at
+       FROM orders
+       WHERE LOWER(TRIM(COALESCE(cod_advance_status, ''))) = 'paid'
+         AND COALESCE(cod_advance_fee, 0) > 0
+         ${paidTestFilter}`
+    : "SELECT 0 AS advance_amount, NULL AS advance_paid_at FROM DUAL WHERE FALSE";
 
   const { rows } = await query(
     `WITH order_rows AS (
@@ -453,6 +462,12 @@ async function fetchDashboardStats({ adminId, from, to }) {
          AND LOWER(${orderStatusExpr}) <> 'cancelled'
          ${paidTestFilter}
      ),
+     /* Paid ₹99 COD advance delivery charges: collected online and non-refundable,
+      * so they are revenue received on the verification date. Stored separately
+      * from the product amount, so no double counting when COD is later paid. */
+     cod_advances AS (
+       ${codAdvanceCte}
+     ),
      pending_cod_orders AS (
        SELECT *, ${createdDateExpr} AS pending_at
        FROM orders
@@ -468,7 +483,8 @@ async function fetchDashboardStats({ adminId, from, to }) {
           * they equal every confirmed, non-RTO device. */
          CAST(COALESCE((SELECT SUM(quantity) FROM device_orders WHERE is_paid = 1), 0) AS SIGNED) AS devices_sold,
          CAST(COALESCE((SELECT SUM(quantity) FROM device_orders WHERE is_paid = 0), 0) AS SIGNED) AS cod_pending_devices,
-         CAST(COALESCE((SELECT SUM(${revenueExpr}) FROM paid_orders), 0) AS DECIMAL(12,2)) AS revenue_received,
+         CAST(COALESCE((SELECT SUM(${revenueExpr}) FROM paid_orders), 0)
+           + COALESCE((SELECT SUM(advance_amount) FROM cod_advances), 0) AS DECIMAL(12,2)) AS revenue_received,
          CAST(COALESCE(
            (SELECT SUM(CASE
              WHEN device_counted_at IS NOT NULL
@@ -492,6 +508,13 @@ async function fetchDashboardStats({ adminId, from, to }) {
                AND paid_at < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
              THEN ${revenueExpr} ELSE 0 END)
             FROM paid_orders),
+           0)
+           + COALESCE(
+           (SELECT SUM(CASE
+             WHEN advance_paid_at >= ${todayStartExpr}
+               AND advance_paid_at < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)
+             THEN advance_amount ELSE 0 END)
+            FROM cod_advances),
            0) AS DECIMAL(12,2)) AS today_revenue,
          CAST(COALESCE(
            (SELECT SUM(CASE
@@ -516,6 +539,13 @@ async function fetchDashboardStats({ adminId, from, to }) {
                AND paid_at < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)
              THEN ${revenueExpr} ELSE 0 END)
             FROM paid_orders),
+           0)
+           + COALESCE(
+           (SELECT SUM(CASE
+             WHEN advance_paid_at >= ${monthStartExpr}
+               AND advance_paid_at < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)
+             THEN advance_amount ELSE 0 END)
+            FROM cod_advances),
            0) AS DECIMAL(12,2)) AS month_revenue
      ),
      analysis AS (
@@ -534,6 +564,12 @@ async function fetchDashboardStats({ adminId, from, to }) {
            FROM paid_orders
            WHERE (? IS NULL OR paid_at >= ${istDateParameterStartExpression("?")})
              AND (? IS NULL OR paid_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
+         ), 0)
+         + COALESCE((
+           SELECT SUM(advance_amount)
+           FROM cod_advances
+           WHERE (? IS NULL OR advance_paid_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR advance_paid_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0) AS DECIMAL(12,2)) AS analysis_revenue_received,
          CAST(COALESCE((
            SELECT SUM(${revenueExpr})
