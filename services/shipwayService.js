@@ -285,10 +285,14 @@ export async function getShipwayServiceableCarrierIds(pincode, { cod = false, ti
   }
 }
 
+/** Marker for the last attempt: no carrier_id, so Shipway auto-assigns by its own courier rules. */
+export const SHIPWAY_AUTO_ASSIGN = Object.freeze({ carrierId: null, carrierName: "Shipway auto-assign", source: "auto" });
+
 /**
- * Ordered list of carriers to try for one order. Serviceable carriers keep their
- * priority position; carriers Shipway says cannot serve the pincode are dropped,
- * but only when the check actually recognised at least one active carrier.
+ * Every active courier, in order: SHIPWAY_CARRIER_PRIORITY first (default Amazon, then
+ * Ekart Surface), then all the others. Couriers the pincode check reports as not
+ * serviceable are moved to the end (never removed, so every courier is still tried).
+ * The final entry lets Shipway auto-assign any courier it can.
  */
 export async function resolveShipwayCarrierCandidates({ pincode = null, cod = false } = {}) {
   const carriers = await getShipwayCarriers();
@@ -302,43 +306,60 @@ export async function resolveShipwayCarrierCandidates({ pincode = null, cod = fa
   }
   const ranked = rankShipwayCarriers(carriers);
   const serviceable = pincode ? await getShipwayServiceableCarrierIds(pincode, { cod }) : null;
-  const filtered = serviceable ? ranked.filter((carrier) => serviceable.has(carrier.id)) : [];
-  const list = filtered.length ? filtered : ranked;
-  return list.map((carrier) => ({ carrierId: carrier.id, carrierName: carrier.name || carrier.title || null, source: filtered.length ? "serviceable" : "priority" }));
+  const known = Boolean(serviceable) && ranked.some((carrier) => serviceable.has(carrier.id));
+  const ordered = known
+    ? [...ranked.filter((carrier) => serviceable.has(carrier.id)), ...ranked.filter((carrier) => !serviceable.has(carrier.id))]
+    : ranked;
+  return [
+    ...ordered.map((carrier) => ({ carrierId: carrier.id, carrierName: carrier.name || carrier.title || null, source: known && serviceable.has(carrier.id) ? "serviceable" : "priority" })),
+    { ...SHIPWAY_AUTO_ASSIGN },
+  ];
 }
 
-const COURIER_UNAVAILABLE_PATTERN = /no shipping services available|A-306|not serviceable|non[- ]?serviceable|unserviceable|serviceability|pincode is not|pin ?code not|no courier found|carrier_id does not exist|courier (?:is )?not available|carrier unavailable|courier unavailable/i;
+/** Every string anywhere in a Shipway body (Shipway nests reasons in strings, arrays or objects). */
+function stringsIn(value, out = [], depth = 0) {
+  if (value == null || depth > 6) return out;
+  if (typeof value === "string") { if (value.trim()) out.push(value); return out; }
+  if (Array.isArray(value)) { value.forEach((item) => stringsIn(item, out, depth + 1)); return out; }
+  if (typeof value === "object") Object.values(value).forEach((item) => stringsIn(item, out, depth + 1));
+  return out;
+}
 
-function errorTexts(error) {
+/** Human-readable reason Shipway gave for not assigning a courier. */
+export function shipwayRefusalReason(error) {
   const body = error?.upstreamBody;
-  const awbResponse = body?.awb_response;
-  // Upstream Shipway text only: our own wrapper messages always say "not assigned yet".
-  return [body?.message, body?.error,
-    typeof awbResponse === "string" ? awbResponse : awbResponse?.message, awbResponse?.error]
-    .filter((value) => typeof value === "string");
+  const awb = body?.awb_response;
+  const parts = stringsIn(awb != null && awb !== "" ? awb : body).filter((text) => !/^(true|false|0|1)$/i.test(text.trim()));
+  const text = (parts.join(" ") || String(error?.message || "refused")).replace(/[\r\n]+/g, " ").replace(/^Shipway:\s*/, "").trim();
+  return text.slice(0, 200);
 }
 
 /**
- * True when Shipway refused this specific courier (cannot serve the address) and no
- * AWB/label was produced, so trying the next courier cannot create a second shipment.
- * Timeouts and ambiguous outcomes are never treated as a courier refusal.
+ * What to do after one courier attempt failed:
+ *  - "refused": Shipway did not assign this courier and produced no AWB/label -> try the next courier.
+ *  - "pending": order accepted, courier answer not given yet -> wait briefly for an AWB, then move on.
+ *  - "stop":    outcome unknown (timeout), an AWB/label exists, or an account/server problem -> never book again.
  */
-export function isShipwayCourierUnavailable(error) {
-  if (!error || error.code === "SHIPWAY_OUTCOME_UNKNOWN") return false;
+export function classifyShipwayBookingFailure(error) {
+  if (!error || error.code === "SHIPWAY_OUTCOME_UNKNOWN") return "stop";
   const body = error.upstreamBody;
-  if (valueOf(body, ["AWB", "awb", "awb_number", "tracking_number"]) || valueOf(body, ["shipping_url", "label_url", "shipping_label_url"])) return false;
-  if (error.code === "SHIPWAY_PARTIAL_OR_REJECTED") {
-    return Boolean(error.noCourier) || errorTexts(error).some((text) => COURIER_UNAVAILABLE_PATTERN.test(text));
-  }
-  if (error.code === "SHIPWAY_UPSTREAM_ERROR" && [400, 409, 422].includes(error.status)) {
-    return errorTexts(error).some((text) => COURIER_UNAVAILABLE_PATTERN.test(text));
-  }
-  return false;
+  if (valueOf(body, ["AWB", "awb", "awb_number", "tracking_number"]) || valueOf(body, ["shipping_url", "label_url", "shipping_label_url"])) return "stop";
+  if (error.code === "SHIPWAY_UPSTREAM_ERROR") return [400, 404, 409, 422].includes(error.status) ? "refused" : "stop";
+  if (error.code !== "SHIPWAY_PARTIAL_OR_REJECTED") return "stop";
+  const awbResponse = body?.awb_response;
+  if (awbResponse == null || awbResponse === "") return isTruthyFlag(body?.success) ? "pending" : "refused";
+  if (typeof awbResponse === "object" && !Array.isArray(awbResponse) && isTruthyFlag(awbResponse.success)) return "pending";
+  return "refused";
+}
+
+/** True when Shipway refused this courier without creating an AWB/label (safe to try the next courier). */
+export function isShipwayCourierUnavailable(error) {
+  return classifyShipwayBookingFailure(error) === "refused";
 }
 
 /** Shipway refused a re-push because the order id is already present. */
 export function isShipwayDuplicateOrderResponse(error) {
-  return errorTexts(error).some((text) => /already exists?|duplicate order|order id exists/i.test(text));
+  return stringsIn(error?.upstreamBody).some((text) => /already exists?|duplicate order|order id exists/i.test(text));
 }
 
 /** Read-only reconciliation. It never creates, modifies, or cancels a Shipway order. */

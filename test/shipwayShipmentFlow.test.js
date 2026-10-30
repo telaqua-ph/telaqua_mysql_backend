@@ -281,7 +281,7 @@ test("successful booking saves provider, carrier, AWB, label and Ready to Ship; 
 
 test("rejected booking saves nothing, releases the lock, and a retry looks up then books exactly once", async () => {
   const db = createFakeDb({ orders: [baseOrder] });
-  await withHarness({ db, responses: [v2orders(NO_COURIER, 202), getorders(NOT_FOUND), v2orders(BOOKED)] }, async ({ calls, logs }) => {
+  await withHarness({ db, responses: [v2orders(NO_COURIER, 202), getorders(NOT_FOUND), v2orders(NO_COURIER, 202), getorders(NOT_FOUND), v2orders(BOOKED)] }, async ({ calls, logs }) => {
     const rejected = await call(createOrderShipment, { params: { orderId: "873" } });
     assert.equal(rejected.statusCode, 422);
     assert.equal(rejected.body.retryable, true);
@@ -300,7 +300,7 @@ test("rejected booking saves nothing, releases the lock, and a retry looks up th
 
     const retry = await call(createOrderShipment, { params: { orderId: "873" } });
     assert.equal(retry.statusCode, 201, JSON.stringify(retry.body));
-    assert.deepEqual(calls.map((entry) => entry.url.replace(/\?.*/, "").split("/").at(-1)), ["getcarrier", "pincodeserviceable", "v2orders", "getorders", "getcarrier", "pincodeserviceable", "v2orders"]);
+    assert.deepEqual(calls.map((entry) => entry.url.replace(/\?.*/, "").split("/").at(-1)), ["getcarrier", "pincodeserviceable", "v2orders", "getorders", "v2orders", "getorders", "getcarrier", "pincodeserviceable", "v2orders"]);
     assert.equal(shipment.processing_token, null);
     assert.equal(db.shipments.get(shipment.id).waybill_number, "SW900873");
     assertNoSecrets(logs);
@@ -555,26 +555,71 @@ test("if a refused courier was assigned after all, it is saved and nothing is bo
   });
 });
 
-test("no courier can deliver -> Booking Failed listing every courier tried; Retry runs the fallback again", async () => {
+test("no courier accepts (incl. Shipway auto-assign) -> Booking Failed listing every courier; Retry runs the fallback again", async () => {
   const db = createFakeDb({ orders: [baseOrder] });
   const carriers = getcarrier({ success: 1, message: [{ id: "5", name: "Ekart Surface" }, { id: "7", name: "Amazon Shipping" }] });
   await withHarness({ db, responses: [
-    carriers, v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(NOT_SERVICEABLE),
+    carriers, v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(NOT_SERVICEABLE),
     // Retry: Shipway still holds the unassigned order, so the fallback runs again.
     getorders(UNASSIGNED), carriers, v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(bookedWith(5, "Ekart Surface")),
   ] }, async ({ calls }) => {
     const failed = await call(createOrderShipment, { params: { orderId: "873" } });
     assert.equal(failed.statusCode, 422, JSON.stringify(failed.body));
-    assert.match(failed.body.message, /No courier could deliver order TAQ-000873 to pincode 560001/);
-    assert.match(failed.body.message, /Amazon Shipping \(.*A-306.*\); Ekart Surface/);
+    assert.match(failed.body.message, /No courier accepted order TAQ-000873 \(pincode 560001\)/);
+    assert.match(failed.body.message, /Amazon Shipping \(.*A-306.*\); Ekart Surface \(.*\); Shipway auto-assign/);
     const [shipment] = db.shipments.values();
     assert.equal(shipment.shipment_status, "Booking Failed");
     assert.equal(shipment.processing_token, null);
 
     const retry = await call(createOrderShipment, { params: { orderId: "873" } });
     assert.equal(retry.statusCode, 201, JSON.stringify(retry.body));
-    assert.deepEqual(bookedCarrierIds(calls), [7, 5, 7, 5]);
+    assert.deepEqual(bookedCarrierIds(calls), [7, 5, undefined, 7, 5]);
     assert.equal(db.shipments.get(shipment.id).courier_name, "Ekart Surface");
+  });
+});
+
+test("the live Amazon refusal shapes (string, error array, message object) all move on to Ekart Surface", async () => {
+  const reason = "Amazon Shipping (carrier_id 19339) No shipping services available for recipient address. Please verify address or contact support. (A-306)";
+  const shapes = [
+    { success: true, message: "Order has been added successfully", awb_response: reason },
+    { success: true, message: "Order has been added successfully", awb_response: { success: false, error: [reason] } },
+    { success: "1", message: "Order has been added successfully", awb_response: { success: "0", message: { error: reason } } },
+    { success: false, message: reason },
+  ];
+  for (const shape of shapes) {
+    const db = createFakeDb({ orders: [baseOrder] });
+    await withHarness({ db, responses: [PRIORITY_CARRIERS, v2orders(shape), getorders(UNASSIGNED), v2orders(bookedWith(5, "Ekart Surface"))] }, async ({ calls }) => {
+      const res = await call(createOrderShipment, { params: { orderId: "873" } });
+      assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+      assert.deepEqual(bookedCarrierIds(calls), [7, 5]);
+      assert.match(res.body.courier_attempts[0].reason, /A-306/);
+    });
+  }
+});
+
+test("a courier that answers nothing is waited for, then the next courier is tried", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  const accepted = { success: true, message: "Order has been added successfully" };
+  await withHarness({ db, responses: [PRIORITY_CARRIERS, v2orders(accepted), getorders(UNASSIGNED), getorders(UNASSIGNED), getorders(UNASSIGNED), v2orders(bookedWith(5, "Ekart Surface"))] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.deepEqual(bookedCarrierIds(calls), [7, 5]);
+  });
+});
+
+test("every courier is tried, then Shipway auto-assign books whatever courier accepts", async () => {
+  const db = createFakeDb({ orders: [baseOrder] });
+  const auto = { success: true, message: "Order created", awb_response: { success: true, AWB: "XB1", carrier_id: 88, carrier_name: "Xpressbees", shipping_url: "https://labels.example/XB1.pdf" } };
+  await withHarness({ db, responses: [
+    PRIORITY_CARRIERS,
+    v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED),
+    v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED), v2orders(NOT_SERVICEABLE), getorders(UNASSIGNED),
+    v2orders(auto),
+  ] }, async ({ calls }) => {
+    const res = await call(createOrderShipment, { params: { orderId: "873" } });
+    assert.equal(res.statusCode, 201, JSON.stringify(res.body));
+    assert.deepEqual(bookedCarrierIds(calls), [7, 5, 3411, 2, undefined]);
+    assert.equal([...db.shipments.values()][0].courier_name, "Xpressbees");
   });
 });
 
