@@ -29,6 +29,7 @@ import {
   updateOrderDeliveryDetails,
 } from "../controllers/orderDeliveryDetailsController.js";
 import {
+  captureCheckoutLead,
   createCodAdvanceOrder,
   listCodAdvanceIssuesHandler,
   listUnpaidCodCheckoutsHandler,
@@ -49,6 +50,7 @@ router.get("/deleted/export", requireAuth, listDeletedOrdersHandler);
 router.post("/export", requireAuth, exportOrders);
 router.post("/", createOrder);
 router.post("/website-cod", createWebsiteCodOrder);
+router.post("/checkout-lead", captureCheckoutLead);
 router.post("/website-cod/advance/create-order", createCodAdvanceOrder);
 router.post("/website-cod/advance/verify", verifyCodAdvancePayment);
 router.get("/cod-advance/issues", requireAuth, listCodAdvanceIssuesHandler);

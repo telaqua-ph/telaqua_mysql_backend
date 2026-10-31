@@ -256,9 +256,9 @@ test("verify endpoint with a valid signature returns the order and payment break
   });
 });
 
-test("legacy COD endpoint without the advance is closed while the fee is required", async () => {
+test("website COD endpoint is open without the advance and validates the body", async () => {
   const res = mockRes();
   await createWebsiteCodOrder({ body: { customer_name: "x" } }, res);
-  assert.equal(res.statusCode, 410);
-  assert.equal(res.body.code, "COD_ADVANCE_REQUIRED");
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.success, false);
 });

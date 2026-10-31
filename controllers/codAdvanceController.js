@@ -21,6 +21,7 @@ import {
   listUnpaidCodCheckouts,
   dismissUnpaidCodCheckout,
   markCodAdvanceRefunded,
+  saveCheckoutLead,
 } from "../services/codAdvanceService.js";
 import { createInvoiceAccessToken, validateWebsiteCodOrder } from "./orderController.js";
 import { listOnlineLeadOrders } from "../services/leads.js";
@@ -148,6 +149,32 @@ export async function verifyCodAdvancePayment(req, res) {
       success: false,
       message: "We could not confirm your payment right now. If ₹99 was debited, do not pay again — it will be confirmed automatically.",
     });
+  }
+}
+
+/**
+ * POST /api/orders/checkout-lead — storefront saves the shipping details once
+ * they are complete, so a customer who leaves without ordering appears in Leads.
+ */
+export async function captureCheckoutLead(req, res) {
+  try {
+    const validation = validateWebsiteCodOrder(req.body || {});
+    if (validation.error) {
+      return res.status(400).json({ success: false, message: validation.error });
+    }
+    const orderData = validation.data;
+    let pricing = await resolveOrderPricing(orderData);
+    // An invalid promo code must not lose the lead: fall back to the list price.
+    if (pricing.error && orderData.promo_code) {
+      pricing = await resolveOrderPricing({ ...orderData, promo_code: null });
+    }
+    const productAmount = pricing.error ? 0 : buildFinancialSnapshot(pricing).finalTotal;
+    const leadId = await saveCheckoutLead({ orderData, productAmount });
+    return res.json({ success: true, lead_id: leadId });
+  } catch (error) {
+    if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
+    console.error("Checkout lead capture error:", error);
+    return res.status(500).json({ success: false, message: "Unable to save checkout details." });
   }
 }
 

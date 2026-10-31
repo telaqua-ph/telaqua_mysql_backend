@@ -125,6 +125,44 @@ export async function createCodAdvanceCheckout({ orderData, productAmount, invoi
   return { attemptId, razorpayOrder };
 }
 
+/**
+ * Leads: saves the checkout details a customer has entered, before any order
+ * exists. Stored as an attempt with no Razorpay order (amount_paise = 0), so it
+ * shows on the Leads page until that phone places a real order. One open lead
+ * per phone: a repeat capture updates it instead of adding another row.
+ * @returns {Promise<number>} the lead (attempt) id
+ */
+export async function saveCheckoutLead({ orderData, productAmount }) {
+  const payload = JSON.stringify({ orderData, source: "checkout_lead" });
+  const amount = round2(productAmount);
+  const { rows } = await query(
+    `SELECT cap.id FROM cod_advance_payments cap
+     WHERE cap.amount_paise = 0 AND cap.razorpay_order_id IS NULL AND cap.order_id IS NULL
+       AND cap.status = 'created'
+       AND JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone')) = ?
+       AND NOT EXISTS (
+         SELECT 1 FROM orders o WHERE o.phone = ? AND o.created_at >= cap.created_at
+       )
+     ORDER BY cap.id DESC
+     LIMIT 1`,
+    [orderData.phone, orderData.phone]
+  );
+  if (rows[0]) {
+    await query(
+      `UPDATE cod_advance_payments SET checkout_payload = ?, product_amount = ? WHERE id = ?`,
+      [payload, amount, rows[0].id]
+    );
+    return rows[0].id;
+  }
+  const inserted = await query(
+    `INSERT INTO cod_advance_payments
+       (amount_paise, status, checkout_payload, product_amount, declaration_accepted_at)
+     VALUES (0, 'created', ?, ?, NOW())`,
+    [payload, amount]
+  );
+  return inserted.insertId;
+}
+
 export async function findCodAdvanceByRazorpayOrderId(razorpayOrderId) {
   const { rows } = await query(
     `SELECT * FROM cod_advance_payments WHERE razorpay_order_id = ? LIMIT 1`,
@@ -391,10 +429,13 @@ export function leadsStartEpochSeconds() {
  * - Removed only when that phone places a REAL order afterwards: a COD order or
  *   a paid online order. An unpaid online (Razorpay) order from the same phone
  *   is itself a lead and must NOT hide the COD lead.
+ * - Checkout leads (amount_paise = 0, details saved before Place Order) are
+ *   removed once that phone places any order, since that order is followed up
+ *   on its own.
  */
 export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
   const { rows } = await query(
-    `SELECT cap.id, cap.status, cap.product_amount, cap.failure_reason,
+    `SELECT cap.id, cap.status, cap.amount_paise, cap.product_amount, cap.failure_reason,
             cap.razorpay_order_id, cap.created_at, cap.updated_at,
             JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.customer_name')) AS customer_name,
             JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone')) AS phone,
@@ -414,7 +455,8 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
          WHERE o.phone = JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone'))
            AND o.created_at >= cap.created_at
            AND (
-             LOWER(TRIM(COALESCE(o.payment_status, ''))) = 'paid'
+             cap.amount_paise = 0
+             OR LOWER(TRIM(COALESCE(o.payment_status, ''))) = 'paid'
              OR LOWER(TRIM(COALESCE(o.payment_mode, ''))) = 'cod'
              OR (LOWER(TRIM(COALESCE(o.payment_mode, ''))) <> 'razorpay'
                  AND LOWER(TRIM(COALESCE(o.payment_method, ''))) IN ('cod', 'cash on delivery', 'cash_on_delivery'))
@@ -445,6 +487,7 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
       promo_code: clean(row.promo_code),
       quantity: Number(row.quantity) || 1,
       product_amount: Number(row.product_amount) || 0,
+      amount_paise: Number(row.amount_paise) || 0,
     });
   }
   return latest;
