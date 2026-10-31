@@ -28,6 +28,7 @@ import promoCodesRoutes from "./routes/promoCodes.js";
 import inventoryRoutes from "./routes/inventory.js";
 import adminPushRoutes from "./routes/adminPush.js";
 import invoiceLinkRoutes from "./routes/invoiceLink.js";
+import trackLinkRoutes from "./routes/trackLink.js";
 import { handleSwipeWebhook } from "./controllers/swipeWebhookController.js";
 import { handleRazorpayWebhook } from "./controllers/razorpayWebhookController.js";
 
@@ -181,6 +182,9 @@ app.use("/api/admin/push", adminPushRoutes);
 
 // Public WhatsApp invoice link (MyOperator template button: /i/{{1}})
 app.use("/i", invoiceLinkRoutes);
+
+// Public WhatsApp tracking link (Interakt "Track order" button: /t/{{1}}, {{1}} = AWB)
+app.use("/t", trackLinkRoutes);
 
 // 404 fallback
 app.use((req, res) => {

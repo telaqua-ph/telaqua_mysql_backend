@@ -7,8 +7,10 @@
  *
  * Interakt template (create + get approved first), default name order_shipped_tracking:
  *   Body:   Hi {{1}}, your Tel-Aqua order {{2}} has been shipped via {{3}}.
- *   Button: URL "Track order" -> https://telaqua.shipway.com/tracking/forward/{{1}}
- *           (button value = AWB; or set INTERAKT_SHIPPED_BUTTON_MODE=url and use {{1}})
+ *   Button: URL "Track order" -> https://<BACKEND_BASE_URL>/t/{{1}}   (button value = AWB)
+ *           /t/ is our own page (Meta can open it); /t/<AWB> redirects to the
+ *           Shipway tracking page (routes/trackLink.js), like /i/{{1}} for invoices.
+ *           Or set INTERAKT_SHIPPED_BUTTON_MODE=url and use {{1}} for the full link.
  *
  * .env
  *   INTERAKT_SHIPPED_ENABLED=true            (default false until the template is approved)
