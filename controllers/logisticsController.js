@@ -38,6 +38,7 @@ import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingReje
 import { DELHIVERY_ONLY_SQL, assertDelhiveryManagedShipment, isShipwayShipment } from "../services/shipmentProvider.js";
 import { recordShipwayTrackingFailure, refreshShipwayShipment } from "../services/shipwayTrackingSyncService.js";
 import { safeShipwayTrackingError } from "../services/shipwayService.js";
+import { sendShipmentTrackingWhatsApp, shipwayTrackingUrl, triggerShipmentTrackingWhatsAppAsync } from "../services/shipmentTrackingNotificationService.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -545,7 +546,9 @@ async function saveExistingShipwayBooking(order, shipment, lookup, lockToken, re
   if (saved.rowCount !== 1) return { status: 409, success: false, message: "Shipment reconciliation changed concurrently; refresh before retrying." };
   await pool.query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [order.id]);
   await writeAudit(shipment.id, adminId(req), "shipway_reconciled", null, { waybill: lookup.awb, carrierId: lookup.carrierId, carrierName: lookup.carrierName, labelUrl: lookup.labelUrl }, pool);
-  return { status: 200, success: true, reconciled: true, message: "Existing Shipway AWB and label were saved; the order is Ready to Ship.", shipment_id: shipment.id, waybill: lookup.awb, label_url: lookup.labelUrl };
+  // Customer gets the shipped + tracking-link WhatsApp once (never blocks shipping).
+  triggerShipmentTrackingWhatsAppAsync(shipment.id);
+  return { status: 200, success: true, reconciled: true, message: "Existing Shipway AWB and label were saved; the order is Ready to Ship.", shipment_id: shipment.id, waybill: lookup.awb, label_url: lookup.labelUrl, tracking_url: shipwayTrackingUrl(lookup.awb) };
 }
 
 const hasShipwayArtifacts = (lookup) => Boolean(lookup?.awb && isHttpUrl(lookup?.labelUrl));
@@ -759,7 +762,10 @@ export async function createOrderShipment(req, res) {
     );
     await pool.query("UPDATE orders SET fulfillment_status='ready_to_ship' WHERE id=?", [orderId]);
     await writeAudit(shipment.id, adminId(req), "shipway_shipment_created", null, { waybill: booking.awb, carrierId: booking.carrierId, carrierName: booking.carrierName, labelUrl: booking.labelUrl, courierAttempts: attempts }, pool);
+    // Customer gets the shipped + tracking-link WhatsApp once (never blocks shipping).
+    triggerShipmentTrackingWhatsAppAsync(shipment.id);
     return res.status(201).json({
+      tracking_url: shipwayTrackingUrl(booking.awb),
       success: true,
       message: attempts.length ? `Shipment is Ready to Ship with ${booking.carrierName || "the next courier"} (skipped: ${describeAttempts(attempts)}).` : "Shipment is Ready to Ship.",
       shipment_id: shipment.id, waybill: booking.awb, label_url: booking.labelUrl, courier: booking.carrierName, courier_attempts: attempts, data,
@@ -1147,6 +1153,18 @@ async function shipwayShipmentForOrder(orderId) {
   return { order, shipment: { ...shipment, shipway_order_number: shipwayOrderNumber(order) } };
 }
 
+async function trackingNotificationFor(shipmentId) {
+  try {
+    const { rows } = await pool.query(
+      "SELECT status, attempts, last_error, sent_at, updated_at FROM shipment_tracking_notifications WHERE shipment_id=? AND channel='whatsapp' LIMIT 1",
+      [shipmentId]
+    );
+    return rows[0] || null;
+  } catch {
+    return null; // table is created on first send
+  }
+}
+
 async function shipwayTrackingView(shipment) {
   const history = await pool.query("SELECT * FROM shipment_tracking_history WHERE shipment_id=? ORDER BY COALESCE(event_time, created_at) ASC", [shipment.id]);
   return {
@@ -1154,6 +1172,8 @@ async function shipwayTrackingView(shipment) {
     order_id: shipment.order_id,
     provider: shipment.provider,
     waybill: shipment.waybill_number,
+    tracking_url: shipwayTrackingUrl(shipment.waybill_number),
+    tracking_whatsapp: await trackingNotificationFor(shipment.id),
     courier_name: shipment.courier_name,
     carrier_id: shipment.carrier_id,
     fulfillment_status: shipment.fulfillment_status,
@@ -1177,6 +1197,29 @@ export async function getShipwayOrderTracking(req, res) {
     if (!found.shipment) return res.status(found.status).json({ success: false, message: found.message });
     return res.json({ success: true, ...(await shipwayTrackingView(found.shipment)) });
   } catch (error) { return apiError(res, error, "Unable to load Shipway tracking"); }
+}
+
+/** POST /api/logistics/shipway/orders/:orderId/tracking/send-whatsapp (admin) — send / re-send the tracking link. */
+export async function sendShipwayTrackingWhatsApp(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  try {
+    const found = await shipwayShipmentForOrder(orderId);
+    if (!found.shipment) return res.status(found.status).json({ success: false, message: found.message });
+    if (!found.shipment.waybill_number) return res.status(409).json({ success: false, message: "This shipment has no AWB yet." });
+    const result = await sendShipmentTrackingWhatsApp(found.shipment.id, { force: true });
+    if (result.sent) return res.json({ success: true, message: "Tracking link sent on WhatsApp.", tracking_url: result.trackingUrl });
+    const reasons = {
+      invalid_phone: "The customer's phone number is not a valid Indian mobile number.",
+      test_order: "This is a test order, so no WhatsApp was sent.",
+      not_shipway: "This order is not shipped through Shipway.",
+      already_sent: "A send is already in progress for this shipment.",
+    };
+    const message = result.error
+      ? `WhatsApp could not be sent: ${result.error}`
+      : reasons[result.skipped] || `WhatsApp was not sent (${result.skipped}).`;
+    return res.status(result.error ? 502 : 409).json({ success: false, message, tracking_url: result.trackingUrl || shipwayTrackingUrl(found.shipment.waybill_number) });
+  } catch (error) { return apiError(res, error, "Unable to send the tracking link"); }
 }
 
 export async function refreshShipwayOrderTracking(req, res) {

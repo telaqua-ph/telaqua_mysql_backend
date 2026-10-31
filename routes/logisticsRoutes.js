@@ -17,6 +17,7 @@ import {
   reconcileOrderShipment,
   refreshActiveTracking,
   refreshShipwayOrderTracking,
+  sendShipwayTrackingWhatsApp,
   refreshTracking,
   submitNdr,
   updateShipmentDetails,
@@ -36,6 +37,7 @@ router.post("/orders/:orderId/shipment", createOrderShipment);
 router.post("/orders/:orderId/shipment/reconcile", reconcileOrderShipment);
 router.get("/shipway/orders/:orderId/tracking", getShipwayOrderTracking);
 router.post("/shipway/orders/:orderId/tracking/refresh", refreshShipwayOrderTracking);
+router.post("/shipway/orders/:orderId/tracking/send-whatsapp", sendShipwayTrackingWhatsApp);
 router.get("/shipments/:shipmentId", getShipment);
 router.post("/shipments/:shipmentId/pickup", pickupShipment);
 router.post("/shipments/track-active", refreshActiveTracking);

@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import { pool } from "../config/db.js";
 import { canAdvanceFulfillment } from "./logisticsState.js";
 import { isShipwayShipment } from "./shipmentProvider.js";
+import { triggerShipmentTrackingWhatsAppAsync } from "./shipmentTrackingNotificationService.js";
 import { findShipwayOrder, getShipwayTracking, isHttpUrl, isShipwayPlaceholderStatus, safeShipwayTrackingError } from "./shipwayService.js";
 
 const DEFAULT_MINUTES = 30;
@@ -266,7 +267,7 @@ export async function runShipwayTrackingSync({ db = pool, fetchTracking = getShi
  * courier in Shipway, the AWB, courier and label are saved and the order becomes
  * Ready to Ship, so the admin dashboard stops showing "Booking Failed".
  */
-export async function runShipwayPendingAwbSync({ db = pool, lookup = findShipwayOrder, env = process.env, sleepFn = sleep } = {}) {
+export async function runShipwayPendingAwbSync({ db = pool, lookup = findShipwayOrder, env = process.env, sleepFn = sleep, notifyShipped = triggerShipmentTrackingWhatsAppAsync } = {}) {
   if (pendingRunning) return { skipped: true, reason: "already_running" };
   pendingRunning = true;
   const summary = { skipped: false, checked: 0, saved: 0, failed: 0 };
@@ -321,6 +322,8 @@ export async function runShipwayPendingAwbSync({ db = pool, lookup = findShipway
               [shipment.id, null, "shipway_awb_synced", asJson({ shipment_status: shipment.shipment_status || null }), asJson({ waybill: awb, carrierName: found.carrierName || null, labelUrl })]
             );
             console.log("Shipway AWB synced for pending shipment", { shipmentId: shipment.id, orderNumber });
+            // Customer gets the shipped + tracking-link WhatsApp once (never blocks the sync).
+            notifyShipped(shipment.id);
           }
         } else {
           // No courier assigned yet in Shipway: check again on a later run.

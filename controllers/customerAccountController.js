@@ -23,6 +23,7 @@ import {
 import { normalizePaymentMode, isCodOrder } from "../services/paymentMode.js";
 import { isCustomerCodCancellable, evaluateCustomerCodCancel } from "../services/customerCodCancel.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
+import { trackingUrlFor } from "../services/shipmentTrackingNotificationService.js";
 
 const OTP_EXPIRY_MINUTES = 5;
 const OTP_MAX_ATTEMPTS = 5;
@@ -91,6 +92,21 @@ function mergeShipmentFields(order, shipment = null) {
   };
 }
 
+/**
+ * The AWB and tracking page a customer should use: a Shipway shipment's AWB
+ * (shipments.waybill_number) opens the Shipway page; a legacy Delhivery AWB
+ * (orders.waybill) keeps the Delhivery page.
+ */
+function customerTrackingLink(order, shipment = null) {
+  const shipmentAwb = String(shipment?.waybill_number || "").trim();
+  if (shipmentAwb) {
+    return { awb: shipmentAwb, provider: shipment.provider || null, tracking_url: trackingUrlFor(shipmentAwb, shipment.provider) };
+  }
+  const legacyAwb = String(order?.waybill || "").trim();
+  if (legacyAwb) return { awb: legacyAwb, provider: "Delhivery", tracking_url: trackingUrlFor(legacyAwb, "Delhivery") };
+  return { awb: "", provider: null, tracking_url: null };
+}
+
 function safeOrder(order, req, detailed = false, shipment = null) {
   const merged = mergeShipmentFields(order, shipment);
   const paid = String(merged.payment_status || "").toLowerCase() === "paid";
@@ -113,6 +129,7 @@ function safeOrder(order, req, detailed = false, shipment = null) {
     shipment_status: merged.shipment_status,
     tracking_number: merged.waybill || null,
     waybill: merged.waybill || null,
+    tracking_url: customerTrackingLink(order, shipment).tracking_url,
     delhivery_shipment_id: merged.delhivery_shipment_id || null,
     tracking_status: merged.tracking_status || null,
     tracking_updated_at: merged.tracking_updated_at || null,
@@ -147,7 +164,7 @@ async function loadLatestShipmentsMap(orderIds) {
     const placeholders = ids.map(() => "?").join(",");
     const { rows } = await query(
       `SELECT order_id, waybill_number, shipment_id, shipment_created_at,
-              fulfillment_status, shipment_status, pickup_requested_at
+              fulfillment_status, shipment_status, pickup_requested_at, provider
        FROM shipments
        WHERE sequence_no = 1 AND order_id IN (${placeholders})`,
       ids
@@ -166,7 +183,7 @@ async function loadLatestShipment(orderId, client = null) {
   try {
     const { rows } = await run(
       `SELECT order_id, waybill_number, shipment_id, shipment_created_at,
-              fulfillment_status, shipment_status, pickup_requested_at
+              fulfillment_status, shipment_status, pickup_requested_at, provider
        FROM shipments
        WHERE sequence_no = 1 AND order_id = ?
        LIMIT 1`,
@@ -656,7 +673,7 @@ export async function cancelCustomerCodOrder(req, res) {
     try {
       const shipResult = await client.query(
         `SELECT order_id, waybill_number, shipment_id, shipment_created_at,
-                fulfillment_status, shipment_status, pickup_requested_at
+                fulfillment_status, shipment_status, pickup_requested_at, provider
          FROM shipments
          WHERE sequence_no = 1 AND order_id = ?
          LIMIT 1
@@ -730,7 +747,9 @@ export async function trackCustomerOrder(req, res) {
     return missingOwnedOrderResponse(req.params.orderId, res);
   }
 
-  const awb = order.waybill ? String(order.waybill).trim() : "";
+  const shipment = await loadLatestShipment(order.id);
+  const link = customerTrackingLink(order, shipment);
+  const awb = link.awb;
   if (!awb) {
     return res.status(200).json({
       success: true,
@@ -756,11 +775,12 @@ export async function trackCustomerOrder(req, res) {
       available: true,
       awb,
       waybill: awb,
-      status: order.shipment_status || order.tracking_status || "Created",
+      status: shipment?.shipment_status || order.shipment_status || order.tracking_status || "Created",
       current_location: null,
       estimated_delivery: null,
-      updated_at: order.shipment_created_at || order.tracking_updated_at || null,
-      tracking_url: `https://www.delhivery.com/track/package/${encodeURIComponent(awb)}`,
+      updated_at: shipment?.shipment_created_at || order.shipment_created_at || order.tracking_updated_at || null,
+      courier: link.provider,
+      tracking_url: link.tracking_url,
       events: [],
     },
   });
