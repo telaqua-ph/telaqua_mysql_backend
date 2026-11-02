@@ -8,6 +8,7 @@ import { query } from "../config/db.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
 import { normalizeIndianPhone } from "../utils/phoneUtils.js";
 import { isCodOrder } from "./paymentMode.js";
+import { resolveSoldDevices } from "./soldDeviceQuantity.js";
 import { generateLocalInvoicePdf } from "./localInvoicePdfService.js";
 import {
   createSwipeInvoiceForOrder,
@@ -172,7 +173,7 @@ function mapPaymentMethod(value) {
 
 export function buildSwipePayload(order) {
   const money = getFinancialSnapshot(order);
-  const quantity = Math.max(1, Number(order.quantity) || 1);
+  const quantity = resolveSoldDevices(order).quantity;
   // Swipe validates that unit_price + tax exactly reconciles to price_with_tax.
   // Keep additional precision for the tax-exclusive API value (especially for
   // the Rs 1 test invoice); the document still rounds currency to two decimals.

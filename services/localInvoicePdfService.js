@@ -1,5 +1,6 @@
 import PDFDocument from "pdfkit";
 import { isCodOrder } from "./paymentMode.js";
+import { resolveSoldDevices } from "./soldDeviceQuantity.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
 
 function money(value) {
@@ -50,7 +51,7 @@ export async function generateLocalInvoicePdf(order) {
   const productName = order.is_test_order
     ? "Tel-Aqua Razorpay Test Product"
     : process.env.TELAQUA_PRODUCT_NAME || "Tel-Aqua PH Meter";
-  const quantity = Math.max(1, Number(order.quantity) || 1);
+  const quantity = resolveSoldDevices(order).quantity;
   const finalTotal = Number(order.final_total ?? order.total_amount ?? 0);
   const shipping = Number(order.shipping_amount || 0);
   const taxable = Number(order.taxable_amount ?? finalTotal - shipping);

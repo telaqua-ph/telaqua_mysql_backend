@@ -108,9 +108,16 @@ async function callIndiaPost(url, { method = "GET", headers = {}, body } = {}) {
       signal: controller.signal,
     });
   } catch (error) {
+    if (error?.name === "AbortError") {
+      throw indiaPostError("INDIA_POST_TIMEOUT", `India Post did not respond within ${REQUEST_TIMEOUT_MS / 1000} seconds (${new URL(url).host}). Usually the server IP is not whitelisted yet, or India Post's test server is down.`);
+    }
+    // Node fetch puts the real network reason in error.cause (ENOTFOUND, ECONNREFUSED, ETIMEDOUT, certificate errors...).
+    const cause = error?.cause || {};
+    const reason = [cause.code, cause.message || error?.message].filter(Boolean).join(": ").slice(0, 200);
     throw indiaPostError(
-      error?.name === "AbortError" ? "INDIA_POST_TIMEOUT" : "INDIA_POST_NETWORK_ERROR",
-      error?.name === "AbortError" ? "India Post did not respond in time." : "India Post could not be reached. If this keeps happening, check that the server IP is whitelisted on the India Post developer portal."
+      "INDIA_POST_NETWORK_ERROR",
+      `India Post could not be reached (${new URL(url).host}${reason ? ` - ${reason}` : ""}). If this keeps happening, check that the server IP is whitelisted on the India Post developer portal.`,
+      { networkCause: cause.code || null }
     );
   } finally {
     clearTimeout(timer);
