@@ -1346,8 +1346,17 @@ export async function getIndiaPostStatus(req, res) {
       login = { ok: false, code: error?.code || null, message: String(error?.message || "Login failed").slice(0, 300) };
     }
   }
+  // The address India Post sees for this server: add it under "Whitelist my IP Address".
+  let serverIp = null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const ipResponse = await fetch("https://api.ipify.org?format=json", { signal: controller.signal }).finally(() => clearTimeout(timer));
+    serverIp = (await ipResponse.json())?.ip || null;
+  } catch { serverIp = null; }
   return res.json({
     success: true,
+    server_outbound_ip: serverIp,
     environment: config.environment,
     base_url: config.baseUrl,
     customer_id: config.customerId || null,
