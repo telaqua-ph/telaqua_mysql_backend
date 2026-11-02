@@ -79,3 +79,22 @@ test("query-string AWB parsing", () => {
   assert.equal(awbFromQueryString("/t/?SMMC1&x=1"), "SMMC1");
   assert.equal(awbFromQueryString("/t/"), "");
 });
+
+test("India Post article: /t/<article> shows our tracking page with India Post's live status", async () => {
+  const db = { query: async (sql, params) => (String(sql).includes("FROM shipments") && params[0] === "EB468827991IN" ? { rows: [{ provider: "IndiaPost" }] } : { rows: [] }) };
+  const app = express();
+  app.use("/t", createTrackLinkRouter({
+    db,
+    fetchIndiaPostTracking: async () => ({ currentStatus: "In Transit", estimatedDelivery: null, history: [{ status: "Item Booked", location: "Hyderabad GPO", eventTime: "2026-11-02T10:00:00Z" }] }),
+  }));
+  const server = app.listen(0);
+  await new Promise((r) => server.once("listening", r));
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.address().port}/t/EB468827991IN`, { redirect: "manual" });
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /In Transit/);
+    assert.match(html, /Item Booked/);
+    assert.match(html, /EB468827991IN/);
+  } finally { server.close(); }
+});

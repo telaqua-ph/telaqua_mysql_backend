@@ -18,6 +18,11 @@ import {
   refreshActiveTracking,
   refreshShipwayOrderTracking,
   sendShipwayTrackingWhatsApp,
+  createIndiaPostShipment,
+  getIndiaPostOrderTracking,
+  getIndiaPostStatus,
+  refreshIndiaPostOrderTracking,
+  sendIndiaPostTrackingWhatsApp,
   refreshTracking,
   submitNdr,
   updateShipmentDetails,
@@ -38,6 +43,11 @@ router.post("/orders/:orderId/shipment/reconcile", reconcileOrderShipment);
 router.get("/shipway/orders/:orderId/tracking", getShipwayOrderTracking);
 router.post("/shipway/orders/:orderId/tracking/refresh", refreshShipwayOrderTracking);
 router.post("/shipway/orders/:orderId/tracking/send-whatsapp", sendShipwayTrackingWhatsApp);
+router.get("/indiapost/status", getIndiaPostStatus);
+router.post("/indiapost/orders/:orderId/shipment", createIndiaPostShipment);
+router.get("/indiapost/orders/:orderId/tracking", getIndiaPostOrderTracking);
+router.post("/indiapost/orders/:orderId/tracking/refresh", refreshIndiaPostOrderTracking);
+router.post("/indiapost/orders/:orderId/tracking/send-whatsapp", sendIndiaPostTrackingWhatsApp);
 router.get("/shipments/:shipmentId", getShipment);
 router.post("/shipments/:shipmentId/pickup", pickupShipment);
 router.post("/shipments/track-active", refreshActiveTracking);

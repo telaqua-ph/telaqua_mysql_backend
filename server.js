@@ -11,6 +11,7 @@ import { isDatabaseConfigured } from "./config/db.js";
 import { buildIdentity } from "./lib/buildIdentity.js";
 import { startLogisticsTrackingSync, stopLogisticsTrackingSync } from "./services/logisticsSyncService.js";
 import { startShipwayTrackingSync, stopShipwayTrackingSync } from "./services/shipwayTrackingSyncService.js";
+import { startIndiaPostTrackingSync, stopIndiaPostTrackingSync } from "./services/indiaPostShipmentService.js";
 import { startCheckoutReminderSync, stopCheckoutReminderSync } from "./services/checkoutReminderService.js";
 import { startOrderPushWorker, stopOrderPushWorker } from "./services/orderPushWorker.js";
 import { isWebPushConfigured } from "./services/webPushConfig.js";
@@ -53,6 +54,8 @@ try {
     startLogisticsTrackingSync();
     // Separate Shipway worker; it only starts when SHIPWAY_TRACKING_SYNC_ENABLED=true.
     startShipwayTrackingSync();
+    // India Post tracking: only runs when INDIA_POST_USERNAME is set.
+    startIndiaPostTrackingSync();
     startCheckoutReminderSync();
     startOrderPushWorker();
   });
@@ -76,6 +79,7 @@ function shutdown(signal) {
   console.log(`Received ${signal}, shutting down...`);
   stopLogisticsTrackingSync();
   stopShipwayTrackingSync();
+  stopIndiaPostTrackingSync();
   stopCheckoutReminderSync();
   stopOrderPushWorker();
   if (!server) {

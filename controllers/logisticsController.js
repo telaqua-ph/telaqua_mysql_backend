@@ -38,7 +38,9 @@ import { createShipwayShipment, findShipwayOrder, isDefinitiveShipwayBookingReje
 import { DELHIVERY_ONLY_SQL, assertDelhiveryManagedShipment, isShipwayShipment } from "../services/shipmentProvider.js";
 import { recordShipwayTrackingFailure, refreshShipwayShipment } from "../services/shipwayTrackingSyncService.js";
 import { safeShipwayTrackingError } from "../services/shipwayService.js";
-import { sendShipmentTrackingWhatsApp, shipwayTrackingUrl, triggerShipmentTrackingWhatsAppAsync } from "../services/shipmentTrackingNotificationService.js";
+import { sendShipmentTrackingWhatsApp, shipwayTrackingUrl, trackingUrlFor, triggerShipmentTrackingWhatsAppAsync } from "../services/shipmentTrackingNotificationService.js";
+import { INDIA_POST_COURIER_NAME, INDIA_POST_PROVIDER, getIndiaPostConfig, getIndiaPostToken, isIndiaPostShipment, missingIndiaPostSettings } from "../services/indiaPostService.js";
+import { bookOrderWithIndiaPost, refreshIndiaPostShipment } from "../services/indiaPostShipmentService.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -646,6 +648,10 @@ export async function createOrderShipment(req, res) {
       shipment.waybill_number || shipment.shipment_id || shipment.shipment_created_at ||
       String(shipment.provider ?? "").trim().toLowerCase() === "delhivery";
     if (active) { await client.query("COMMIT"); return res.status(409).json({ success: false, message: "An active shipment or AWB already exists for this order. It was not sent to Shipway.", shipment }); }
+    if (shipment.processing_token && isIndiaPostShipment(shipment)) {
+      await client.query("COMMIT");
+      return res.status(409).json({ success: false, message: "An India Post booking is in progress for this order. Refresh the order before creating a Shipway shipment." });
+    }
     if (shipment.processing_token) {
       await client.query("COMMIT");
       client.release();
@@ -1278,3 +1284,154 @@ export const compatibilityNdr = (req, res) => runCompatibilityShipmentAction(
 );
 
 export { refreshOneShipment };
+
+/* ---------- India Post (book / record / tracking / WhatsApp) ---------- */
+
+const INDIA_POST_HTTP = {
+  INDIA_POST_CONFIG_ERROR: 503,
+  INDIA_POST_ORDER_DATA_INVALID: 422,
+  INDIA_POST_REJECTED: 422,
+  INDIA_POST_AUTH_FAILED: 502,
+  INDIA_POST_NETWORK_ERROR: 502,
+  INDIA_POST_TIMEOUT: 504,
+  INDIA_POST_UPSTREAM_ERROR: 502,
+  INDIA_POST_NO_BARCODE: 502,
+};
+
+function indiaPostApiError(res, error, fallback) {
+  const status = INDIA_POST_HTTP[error?.code] || error?.httpStatus || 500;
+  if (status >= 500) console.error("India Post error", { code: error?.code, message: String(error?.message || "").slice(0, 300) });
+  const message = INDIA_POST_HTTP[error?.code] || error?.publicMessage ? (error.publicMessage || error.message) : fallback;
+  return res.status(status).json({ success: false, code: error?.code || null, message: message || fallback, ...(error?.barcode ? { barcode: error.barcode } : {}) });
+}
+
+async function indiaPostShipmentForOrder(orderId) {
+  const shipment = await shipmentForOrder(orderId, pool);
+  if (!shipment || !isIndiaPostShipment(shipment)) return { status: 409, message: "This order has no India Post shipment." };
+  return { shipment };
+}
+
+async function indiaPostTrackingView(shipment) {
+  const history = await pool.query("SELECT * FROM shipment_tracking_history WHERE shipment_id=? ORDER BY COALESCE(event_time, created_at) ASC", [shipment.id]);
+  return {
+    shipment_id: shipment.id,
+    order_id: shipment.order_id,
+    provider: shipment.provider,
+    waybill: shipment.waybill_number,
+    courier_name: shipment.courier_name,
+    fulfillment_status: shipment.fulfillment_status,
+    shipment_status: shipment.shipment_status,
+    current_location: shipment.current_location,
+    expected_delivery_date: shipment.expected_delivery_date,
+    delivered_at: shipment.delivered_at,
+    last_tracking_update: shipment.last_tracking_update,
+    last_error: shipment.last_error,
+    tracking_url: trackingUrlFor(shipment.waybill_number, shipment.provider),
+    tracking_whatsapp: await trackingNotificationFor(shipment.id),
+    tracking_history: history.rows,
+  };
+}
+
+/** GET /api/admin/logistics/indiapost/status — settings check + live login test (password never returned). */
+export async function getIndiaPostStatus(req, res) {
+  const config = getIndiaPostConfig();
+  const loginMissing = missingIndiaPostSettings(config);
+  const bookingMissing = missingIndiaPostSettings(config, { forBooking: true });
+  let login = { ok: false, message: loginMissing.length ? `Missing: ${loginMissing.join(", ")}` : null };
+  if (!loginMissing.length) {
+    try {
+      await getIndiaPostToken({ config, force: true });
+      login = { ok: true, message: "India Post login works." };
+    } catch (error) {
+      login = { ok: false, code: error?.code || null, message: String(error?.message || "Login failed").slice(0, 300) };
+    }
+  }
+  return res.json({
+    success: true,
+    environment: config.environment,
+    base_url: config.baseUrl,
+    customer_id: config.customerId || null,
+    login,
+    booking_ready: bookingMissing.length === 0,
+    booking_missing: bookingMissing,
+  });
+}
+
+/**
+ * POST /api/admin/logistics/indiapost/orders/:orderId/shipment
+ * body: { manual?: boolean, barcode?: "EB123456789IN", weight_grams?: number }
+ * manual=true records an article already booked at the post office counter (no API call).
+ */
+export async function createIndiaPostShipment(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  const body = req.body || {};
+  try {
+    const result = await bookOrderWithIndiaPost(orderId, {
+      manual: body.manual === true || body.manual === "true",
+      barcode: body.barcode,
+      weightGrams: Number(body.weight_grams) || undefined,
+      actorId: adminId(req),
+    });
+    return res.status(201).json({
+      success: true,
+      message: result.manual
+        ? `India Post article ${result.barcode} saved. The order is Ready to Ship.`
+        : `Booked with India Post. Article number ${result.barcode}${result.tariff ? ` (postage ₹${result.tariff})` : ""}. Hand the parcel over at the post office.`,
+      shipment_id: result.shipmentId,
+      waybill: result.barcode,
+      tariff: result.tariff,
+      courier: INDIA_POST_COURIER_NAME,
+      tracking_url: trackingUrlFor(result.barcode, INDIA_POST_PROVIDER),
+    });
+  } catch (error) { return indiaPostApiError(res, error, "Unable to create the India Post shipment."); }
+}
+
+/** GET /api/admin/logistics/indiapost/orders/:orderId/tracking */
+export async function getIndiaPostOrderTracking(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  try {
+    const found = await indiaPostShipmentForOrder(orderId);
+    if (!found.shipment) return res.status(found.status).json({ success: false, message: found.message });
+    return res.json({ success: true, ...(await indiaPostTrackingView(found.shipment)) });
+  } catch (error) { return indiaPostApiError(res, error, "Unable to load India Post tracking."); }
+}
+
+/** POST /api/admin/logistics/indiapost/orders/:orderId/tracking/refresh */
+export async function refreshIndiaPostOrderTracking(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  let shipment = null;
+  try {
+    const found = await indiaPostShipmentForOrder(orderId);
+    if (!found.shipment) return res.status(found.status).json({ success: false, message: found.message });
+    shipment = found.shipment;
+    const result = await refreshIndiaPostShipment(shipment);
+    const latest = await shipmentById(shipment.id, pool);
+    return res.json({
+      success: true,
+      message: result.not_found ? "India Post has no scans for this article yet." : "India Post tracking refreshed.",
+      ...result,
+      ...(await indiaPostTrackingView({ ...shipment, ...latest })),
+    });
+  } catch (error) {
+    if (shipment?.id) await recordShipmentError(shipment.id, error);
+    return indiaPostApiError(res, error, "Unable to refresh India Post tracking.");
+  }
+}
+
+/** POST /api/admin/logistics/indiapost/orders/:orderId/tracking/send-whatsapp */
+export async function sendIndiaPostTrackingWhatsApp(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  try {
+    const found = await indiaPostShipmentForOrder(orderId);
+    if (!found.shipment) return res.status(found.status).json({ success: false, message: found.message });
+    if (!found.shipment.waybill_number) return res.status(409).json({ success: false, message: "This shipment has no article number yet." });
+    const result = await sendShipmentTrackingWhatsApp(found.shipment.id, { force: true });
+    if (result.sent) return res.json({ success: true, message: "Tracking link sent on WhatsApp.", tracking_url: result.trackingUrl });
+    const message = result.error ? `WhatsApp could not be sent: ${result.error}` : `WhatsApp was not sent (${result.skipped}).`;
+    return res.status(result.error ? 502 : 409).json({ success: false, message, tracking_url: result.trackingUrl });
+  } catch (error) { return indiaPostApiError(res, error, "Unable to send the tracking link."); }
+}

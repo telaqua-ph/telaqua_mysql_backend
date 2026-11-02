@@ -14,6 +14,7 @@
 import { Router } from "express";
 import { pool } from "../config/db.js";
 import { trackingUrlFor } from "../services/shipmentTrackingNotificationService.js";
+import { getIndiaPostTracking, isIndiaPostShipment } from "../services/indiaPostService.js";
 
 const router = Router();
 const AWB_PATTERN = /^[A-Za-z0-9-]{4,40}$/;
@@ -59,7 +60,25 @@ async function findShipmentProvider(awb, db) {
   return order.rows[0] ? "Delhivery" : null;
 }
 
-export function createTrackLinkRouter({ db = pool } = {}) {
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/** India Post has no public deep link, so we show its live tracking here. */
+export function indiaPostTrackingPage(awb, tracking) {
+  const events = (tracking?.history || []).slice().reverse();
+  const rows = events.map((event) => `<li style="margin:0 0 14px;padding-left:14px;border-left:3px solid #F47920">
+<strong>${escapeHtml(event.status)}</strong><br><span style="color:#5B6B7F">${escapeHtml([event.location, event.eventTime ? new Date(event.eventTime).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) : ""].filter(Boolean).join(" · "))}</span></li>`).join("");
+  const body = tracking
+    ? `<p style="margin:0 0 6px;color:#5B6B7F">India Post Speed Post · Article <strong>${escapeHtml(awb)}</strong></p>
+<h2 style="margin:0 0 18px;color:#063970">${escapeHtml(tracking.currentStatus || "Booked")}</h2>
+${tracking.estimatedDelivery ? `<p>Expected delivery: <strong>${escapeHtml(tracking.estimatedDelivery)}</strong></p>` : ""}
+${rows ? `<ul style="list-style:none;padding:0;margin:18px 0">${rows}</ul>` : "<p>Your parcel has been booked. Tracking updates appear here once India Post scans it.</p>"}`
+    : `<p style="margin:0 0 6px;color:#5B6B7F">India Post Speed Post · Article <strong>${escapeHtml(awb)}</strong></p>
+<h2 style="margin:0 0 18px;color:#063970">Booked</h2>
+<p>Your parcel has been booked with India Post. Tracking updates appear here once it is scanned at the post office.</p>`;
+  return page("Track your Tel-Aqua order", body);
+}
+
+export function createTrackLinkRouter({ db = pool, fetchIndiaPostTracking = getIndiaPostTracking } = {}) {
   const r = Router();
 
   async function redirectToTracking(rawAwb, res) {
@@ -75,6 +94,15 @@ export function createTrackLinkRouter({ db = pool } = {}) {
         "<p>Tracking is temporarily unavailable. Please try again in a few minutes.</p>"));
     }
     if (!provider) return res.status(404).type("html").send(NOT_FOUND_PAGE);
+    if (isIndiaPostShipment({ provider })) {
+      let tracking = null;
+      try {
+        tracking = await fetchIndiaPostTracking(awb);
+      } catch (error) {
+        console.warn("India Post live tracking unavailable for tracking page", { code: error?.code || null });
+      }
+      return res.status(200).type("html").send(indiaPostTrackingPage(awb.toUpperCase(), tracking));
+    }
     return res.redirect(302, trackingUrlFor(awb, provider));
   }
 

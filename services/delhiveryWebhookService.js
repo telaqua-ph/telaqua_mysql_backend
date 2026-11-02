@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { withDelhiveryDbStage } from "../lib/delhiveryDbDiagnostics.js";
+import { isIndiaPostProvider, isShipwayShipment } from "./shipmentProvider.js";
 import {
   canAdvanceFulfillment,
   mapDelhiveryStatus,
@@ -143,7 +144,8 @@ export async function persistDelhiveryScanPush(event, databasePool) {
       )
     );
     const shipment = rows[0];
-    if (!shipment) {
+    // A Delhivery webhook must never change a Shipway / India Post shipment that shares the number.
+    if (!shipment || isShipwayShipment(shipment) || isIndiaPostProvider(shipment)) {
       throw webhookError(
         "DELHIVERY_WEBHOOK_SHIPMENT_NOT_FOUND",
         "No shipment exists for this AWB."

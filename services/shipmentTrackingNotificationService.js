@@ -44,10 +44,24 @@ export function shipwayTrackingUrl(awb, base = process.env.SHIPWAY_TRACKING_BASE
  * else (older Delhivery shipments, provider NULL) keeps the Delhivery page,
  * matching DELHIVERY_ONLY_SQL in shipmentProvider.js.
  */
+const DEFAULT_BACKEND_BASE = "https://lightpink-reindeer-561421.hostingersite.com";
+
+/** Our own public tracking page (/t/<number>); used for India Post, whose site has no direct link. */
+export function backendTrackingUrl(number, base = process.env.BACKEND_BASE_URL) {
+  const value = String(number || "").trim();
+  if (!value) return null;
+  let root = String(base || "").trim();
+  if (!/^https?:\/\//i.test(root)) root = DEFAULT_BACKEND_BASE;
+  return `${root.replace(/\/+$/, "")}/t/${encodeURIComponent(value)}`;
+}
+
+const isIndiaPost = (provider) => String(provider || "").trim().toLowerCase().replace(/[\s_-]/g, "") === "indiapost";
+
 export function trackingUrlFor(awb, provider) {
   const value = String(awb || "").trim();
   if (!value) return null;
   if (String(provider || "").trim().toLowerCase() === "shipway") return shipwayTrackingUrl(value);
+  if (isIndiaPost(provider)) return backendTrackingUrl(value);
   return `https://www.delhivery.com/track/package/${encodeURIComponent(value)}`;
 }
 
@@ -171,8 +185,11 @@ export async function sendShipmentTrackingWhatsApp(shipmentId, { force = false, 
 
   const awb = String(row.waybill_number || "").trim();
   if (!awb) return { sent: false, skipped: "no_awb" };
-  if (String(row.provider || "").trim().toLowerCase() !== "shipway") return { sent: false, skipped: "not_shipway" };
-  const trackingUrl = shipwayTrackingUrl(awb, env.SHIPWAY_TRACKING_BASE_URL);
+  const shipway = String(row.provider || "").trim().toLowerCase() === "shipway";
+  if (!shipway && !isIndiaPost(row.provider)) return { sent: false, skipped: "not_shipway" };
+  const trackingUrl = shipway
+    ? shipwayTrackingUrl(awb, env.SHIPWAY_TRACKING_BASE_URL)
+    : backendTrackingUrl(awb, env.BACKEND_BASE_URL);
   if (Number(row.is_test_order) === 1) return { sent: false, skipped: "test_order", trackingUrl };
 
   const parsed = normalizeIndianPhone(row.phone);

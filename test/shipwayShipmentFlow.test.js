@@ -464,8 +464,9 @@ test("Shipway shipments are refused by Delhivery operations", async () => {
   });
 });
 
-test("Delhivery-only SQL excludes Shipway regardless of case and keeps provider-less rows", () => {
-  assert.equal(DELHIVERY_ONLY_SQL, "(provider IS NULL OR LOWER(TRIM(provider)) <> 'shipway')");
+test("Delhivery-only SQL excludes Shipway and India Post regardless of case and keeps provider-less rows", () => {
+  assert.equal(DELHIVERY_ONLY_SQL, "(provider IS NULL OR LOWER(TRIM(provider)) NOT IN ('shipway', 'indiapost'))");
+  assert.throws(() => assertDelhiveryManagedShipment({ provider: "IndiaPost" }), { code: "INDIA_POST_MANAGED_SHIPMENT", httpStatus: 409 });
 });
 
 /* ---------- Display and COD cancel ---------- */
