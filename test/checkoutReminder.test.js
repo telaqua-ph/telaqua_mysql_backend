@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { extractFirstName } from "../services/interaktCheckoutReminderService.js";
 import {
+  isEligibleCodLead,
   isEligibleOnlineCheckoutOrder,
   isPaidOrTerminalOrder,
   reminderDelayMinutes,
@@ -64,4 +65,31 @@ test("Paid, Cancelled, Delivered, Completed, COD, and test orders are ineligible
     }),
     false
   );
+});
+
+test("COD leads on the Leads page are due after the reminder delay", () => {
+  const original = process.env.CHECKOUT_REMINDER_DELAY_MINUTES;
+  const now = Date.parse("2026-11-04T10:00:00Z");
+  const oldEnough = new Date(now - 31 * 60 * 1000);
+  const tooSoon = new Date(now - 5 * 60 * 1000);
+  const lead = {
+    id: 107,
+    status: "created",
+    customer_name: "Tadana Vamsi Krishna",
+    phone: "6302862346",
+    updated_at: oldEnough,
+  };
+  try {
+    delete process.env.CHECKOUT_REMINDER_DELAY_MINUTES;
+    assert.equal(isEligibleCodLead(lead, now), true);
+    assert.equal(isEligibleCodLead({ ...lead, updated_at: tooSoon }, now), false);
+    assert.equal(isEligibleCodLead({ ...lead, status: "failed" }, now), true);
+    assert.equal(isEligibleCodLead({ ...lead, status: "dismissed" }, now), false);
+    assert.equal(isEligibleCodLead({ ...lead, customer_name: "  " }, now), false);
+    assert.equal(isEligibleCodLead({ ...lead, phone: "12345" }, now), false);
+    assert.equal(isEligibleCodLead({ ...lead, order_id: 12 }, now), false);
+  } finally {
+    if (original === undefined) delete process.env.CHECKOUT_REMINDER_DELAY_MINUTES;
+    else process.env.CHECKOUT_REMINDER_DELAY_MINUTES = original;
+  }
 });
