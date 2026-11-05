@@ -88,23 +88,34 @@ async function ensureInventoryRow(client) {
 }
 
 async function recordHistory(client, row) {
+  const values = [
+    row.inventory_id,
+    row.sku,
+    row.quantity_change,
+    row.transaction_type,
+    row.order_id ?? null,
+    row.order_number ?? null,
+    row.reason ?? null,
+    row.previous_stock,
+    row.new_stock,
+    row.admin_id ?? null,
+  ];
+  if (row.created_at) {
+    await client.query(
+      `INSERT INTO inventory_history (
+         inventory_id, sku, quantity_change, transaction_type,
+         order_id, order_number, reason, previous_stock, new_stock, admin_id, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [...values, row.created_at]
+    );
+    return;
+  }
   await client.query(
     `INSERT INTO inventory_history (
        inventory_id, sku, quantity_change, transaction_type,
        order_id, order_number, reason, previous_stock, new_stock, admin_id
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      row.inventory_id,
-      row.sku,
-      row.quantity_change,
-      row.transaction_type,
-      row.order_id ?? null,
-      row.order_number ?? null,
-      row.reason ?? null,
-      row.previous_stock,
-      row.new_stock,
-      row.admin_id ?? null,
-    ]
+    values
   );
 }
 
@@ -285,6 +296,8 @@ export async function deductStockForSale(client, {
   orderNumber,
   quantity,
   isTestOrder = false,
+  reason = null,
+  historyAt = null,
 }) {
   if (isTestOrder) {
     return { status: "skipped", reason: "test_order", pendingEmails: [] };
@@ -334,8 +347,10 @@ export async function deductStockForSale(client, {
     transaction_type: "SALE",
     order_id: orderId,
     order_number: orderNumber,
+    reason,
     previous_stock: previousStock,
     new_stock: newStock,
+    created_at: historyAt,
   });
 
   const updatedRow = { ...inv, current_stock: newStock };
@@ -435,6 +450,101 @@ async function aggregateReturns(sku) {
     [sku]
   );
   return Number(rows[0]?.returned || 0);
+}
+
+/**
+ * Confirmed COD orders never went through Razorpay payment confirm, so they
+ * have no SALE row. Write one per order, dated with the order, and reduce stock.
+ * Safe to run more than once: an order that already has a SALE row is skipped.
+ */
+export async function backfillCodOrderSales({ db = pool } = {}) {
+  let rows = [];
+  try {
+    const found = await db.query(
+      `SELECT o.id, o.order_number, o.quantity, o.created_at
+       FROM orders o
+       WHERE (
+           LOWER(TRIM(COALESCE(o.payment_mode, ''))) = 'cod'
+           OR (
+             LOWER(TRIM(COALESCE(o.payment_mode, ''))) NOT IN ('cod', 'razorpay')
+             AND LOWER(TRIM(COALESCE(o.payment_method, ''))) IN ('cod', 'cash on delivery', 'cash_on_delivery')
+           )
+         )
+         AND LOWER(TRIM(COALESCE(o.order_status, ''))) IN (
+           'confirmed', 'processing', 'ready to ship', 'ready_to_ship',
+           'ready to pickup', 'ready_to_pickup', 'shipped', 'in transit',
+           'in_transit', 'out for delivery', 'out_for_delivery', 'delivered',
+           'completed', 'fulfilled'
+         )
+         AND COALESCE(o.is_test_order, 0) = 0
+         AND LOWER(TRIM(COALESCE(o.fulfillment_status, ''))) NOT IN ('rto', 'returned')
+         AND NOT EXISTS (
+           SELECT 1 FROM inventory_history h
+           WHERE h.order_id = o.id AND h.transaction_type = 'SALE'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM shipments s
+           WHERE s.order_id = o.id
+             AND (
+               LOWER(TRIM(COALESCE(s.fulfillment_status, ''))) IN ('rto', 'returned')
+               OR LOWER(COALESCE(s.shipment_status, '')) REGEXP '(^|[^a-z])rto([^a-z]|$)|return'
+             )
+         )
+       ORDER BY o.created_at ASC, o.id ASC
+       LIMIT 2000`
+    );
+    rows = found.rows;
+  } catch (error) {
+    if (isMissingTableError(error)) return { recorded: 0, skipped: 0 };
+    throw error;
+  }
+
+  let recorded = 0;
+  let skipped = 0;
+  for (const order of rows) {
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await deductStockForSale(client, {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        quantity: order.quantity,
+        isTestOrder: false,
+        reason: "COD order",
+        historyAt: order.created_at,
+      });
+      if (result.status === "deducted" || result.status === "already_deducted") {
+        await client.query("COMMIT");
+        if (result.status === "deducted") recorded += 1;
+        else skipped += 1;
+      } else {
+        await client.query("ROLLBACK");
+        skipped += 1;
+        if (result.status === "insufficient_stock") {
+          console.error("COD inventory backfill stopped: not enough stock", {
+            orderId: order.id,
+            orderNumber: order.order_number,
+            available: result.available,
+          });
+          break;
+        }
+      }
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      if (isMissingTableError(error)) return { recorded, skipped };
+      console.error("COD inventory backfill failed:", {
+        orderId: order.id,
+        message: error?.message,
+      });
+      skipped += 1;
+    } finally {
+      client.release();
+    }
+  }
+  if (recorded) {
+    console.log("COD inventory history updated:", { recorded, skipped });
+  }
+  return { recorded, skipped };
 }
 
 export async function getInventorySummary() {

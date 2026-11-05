@@ -17,6 +17,7 @@ import { triggerOrderPlacedWhatsAppAsync } from "../services/interaktOrderPlaced
 import { scheduleMetaPurchase } from "../services/metaPurchase.js";
 import {
   assertStockAvailable,
+  deductStockForSale,
   dispatchInventoryAlertEmails,
   restoreStockForCancellation,
 } from "../services/inventoryService.js";
@@ -600,6 +601,36 @@ function parseOrderId(raw) {
   return id;
 }
 
+/** Reduce stock for a COD order and write the SALE history row. */
+async function recordCodInventorySale({ orderId, orderNumber, quantity }) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const stockResult = await deductStockForSale(client, {
+      orderId,
+      orderNumber,
+      quantity,
+      isTestOrder: false,
+      reason: "COD order",
+    });
+    if (stockResult.status === "insufficient_stock") {
+      await client.query("ROLLBACK");
+      return stockResult;
+    }
+    await client.query("COMMIT");
+    if (stockResult.pendingEmails?.length) {
+      dispatchInventoryAlertEmails(stockResult.pendingEmails);
+    }
+    return stockResult;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    if (isMissingTableError(error)) return { status: "skipped" };
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function currentAdminId(req) {
   const id = Number(req.user?.admin_id ?? req.user?.id);
   return Number.isInteger(id) && id > 0 ? id : null;
@@ -1049,6 +1080,15 @@ export async function createManualCodOrder(req, res) {
 
     const orderData = validation.data;
 
+    const stockCheck = await assertStockAvailable(orderData.quantity);
+    if (!stockCheck.ok) {
+      return res.status(409).json({
+        success: false,
+        message: stockCheck.message,
+        available: stockCheck.available,
+      });
+    }
+
     let pricing = null;
     if (orderData.promo_code) {
       // Coupon applied: price comes from the promo record, same as website COD.
@@ -1178,6 +1218,20 @@ export async function createManualCodOrder(req, res) {
     );
 
     const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
+
+    const stockResult = await recordCodInventorySale({
+      orderId: id,
+      orderNumber,
+      quantity: rows[0]?.quantity,
+    });
+    if (stockResult.status === "insufficient_stock") {
+      await query(`DELETE FROM orders WHERE id = ?`, [id]);
+      return res.status(409).json({
+        success: false,
+        message: "Not enough stock to place this COD order.",
+        available: stockResult.available,
+      });
+    }
 
     triggerOrderFulfillmentAsync(id);
 
@@ -1482,6 +1536,20 @@ export async function createWebsiteCodOrder(req, res) {
 
     const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
 
+    const stockResult = await recordCodInventorySale({
+      orderId: id,
+      orderNumber,
+      quantity: rows[0]?.quantity ?? orderData.quantity,
+    });
+    if (stockResult.status === "insufficient_stock") {
+      await query(`DELETE FROM orders WHERE id = ?`, [id]);
+      return res.status(409).json({
+        success: false,
+        message: "Not enough stock to place this COD order.",
+        available: stockResult.available,
+      });
+    }
+
     triggerOrderFulfillmentAsync(id);
     triggerOrderPlacedWhatsAppAsync({
       orderDbId: id,
@@ -1756,7 +1824,6 @@ export async function updateOrder(req, res) {
     }
 
     const nextOrderStatus = order_status ?? prior.order_status;
-    const nextPaymentStatus = payment_status ?? prior.payment_status;
     const isCancelling =
       nextOrderStatus === "Cancelled" && prior.order_status !== "Cancelled";
 
@@ -1777,10 +1844,7 @@ export async function updateOrder(req, res) {
 
       const { rows } = await client.query(`SELECT * FROM orders WHERE id = ?`, [id]);
 
-      if (
-        isCancelling &&
-        (prior.payment_status === "Paid" || nextPaymentStatus === "Paid")
-      ) {
+      if (isCancelling) {
         const restoreResult = await restoreStockForCancellation(client, {
           orderId: prior.id,
           orderNumber: prior.order_number,
@@ -1852,6 +1916,12 @@ export async function deleteOrder(req, res) {
     // Keep a full snapshot for the Deleted Orders card/list/CSV. If this fails,
     // the whole delete is rolled back so no order is ever lost.
     await archiveDeletedOrder(client, { order: found.rows[0], shipments, user: req.user });
+    await restoreStockForCancellation(client, {
+      orderId: found.rows[0].id,
+      orderNumber: found.rows[0].order_number,
+      quantity: found.rows[0].quantity,
+      adminId: Number(req.user?.admin_id) || null,
+    });
     if (shipments.length) await client.query("DELETE FROM shipments WHERE order_id=?", [id]);
     const deleted = await client.query("DELETE FROM orders WHERE id=?", [id]);
     await client.query("COMMIT");

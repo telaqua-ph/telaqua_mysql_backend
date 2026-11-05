@@ -17,7 +17,7 @@ import {
   isMissingAttributionColumnError,
 } from "../lib/orderAttribution.js";
 import { buildFinancialSnapshot, resolveOrderPricing } from "./orderPricing.js";
-import { assertStockAvailable } from "./inventoryService.js";
+import { assertStockAvailable, deductStockForSale, dispatchInventoryAlertEmails } from "./inventoryService.js";
 import { logPaymentEvent, triggerOrderFulfillmentAsync } from "./confirmRazorpayPayment.js";
 import { triggerOrderPlacedWhatsAppAsync } from "./interaktOrderPlacedService.js";
 import { scheduleMetaPurchase } from "./metaPurchase.js";
@@ -339,7 +339,27 @@ export async function finalizeCodAdvancePayment({ razorpayOrderId, razorpayPayme
        WHERE id = ?`,
       [orderId, payment.id, current.id]
     );
+    const stockResult = await deductStockForSale(client, {
+      orderId,
+      orderNumber,
+      quantity: orderData.quantity,
+      isTestOrder: false,
+      reason: "COD order",
+    });
+    if (stockResult.status === "insufficient_stock") {
+      await client.query("ROLLBACK");
+      await query(
+        `UPDATE cod_advance_payments
+         SET status = 'paid_order_failed', razorpay_payment_id = ?, failure_reason = ?
+         WHERE id = ?`,
+        [payment.id, "Not enough stock to place this COD order.", current.id]
+      );
+      return { status: "order_failed", reason: "Not enough stock to place this COD order." };
+    }
     await client.query("COMMIT");
+    if (stockResult.pendingEmails?.length) {
+      dispatchInventoryAlertEmails(stockResult.pendingEmails);
+    }
     created = { id: orderId, orderNumber, finalTotal: financial.finalTotal };
   } catch (error) {
     await client.query("ROLLBACK").catch(() => {});

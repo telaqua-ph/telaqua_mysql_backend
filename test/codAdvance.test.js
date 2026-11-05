@@ -80,6 +80,25 @@ function fakeDb() {
     if (s.startsWith("SELECT * FROM orders WHERE id")) {
       return { rows: db.orders.filter((o) => o.id === params[0]).map((o) => ({ ...o })) };
     }
+    if (s.includes("FROM inventory_history")) {
+      return { rows: [] };
+    }
+    if (s.includes("FROM inventory")) {
+      return {
+        rows: [{
+          id: 1,
+          sku: "telaqua-ph-meter",
+          product_name: "Tel-Aqua pH Meter",
+          current_stock: 500,
+          low_stock_threshold: 10,
+          low_stock_alert_active: 0,
+          out_of_stock_alert_active: 0,
+        }],
+      };
+    }
+    if (s.startsWith("UPDATE inventory") || s.startsWith("INSERT INTO inventory")) {
+      return { rows: [], insertId: 1, rowCount: 1 };
+    }
     return { rows: [], rowCount: 0 };
   };
   db.client = { query: run, release() {} };
