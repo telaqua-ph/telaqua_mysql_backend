@@ -432,6 +432,73 @@ export async function restoreStockForCancellation(client, {
   };
 }
 
+/**
+ * A deleted order should not keep a SALE row, and that row must not block
+ * removing the order. Put the deducted units back, then drop the history
+ * rows that point at this order.
+ */
+export async function undoInventoryForDeletedOrder(client, { orderId, quantity }) {
+  let rows = [];
+  try {
+    const found = await client.query(
+      `SELECT transaction_type, quantity_change
+       FROM inventory_history
+       WHERE order_id = ?
+         AND transaction_type IN ('SALE', 'CANCELLATION', 'RETURN')`,
+      [orderId]
+    );
+    rows = found.rows;
+  } catch (error) {
+    if (isMissingTableError(error)) return { status: "skipped" };
+    throw error;
+  }
+
+  const sale = rows.find((row) => String(row.transaction_type).toUpperCase() === "SALE");
+  const alreadyReversed = rows.some((row) => {
+    const type = String(row.transaction_type).toUpperCase();
+    return type === "CANCELLATION" || type === "RETURN";
+  });
+
+  if (sale && !alreadyReversed) {
+    const fromHistory = Math.abs(Number(sale.quantity_change));
+    const requested = Number(quantity);
+    const qty = Number.isInteger(fromHistory) && fromHistory > 0
+      ? fromHistory
+      : requested;
+    if (Number.isInteger(qty) && qty > 0) {
+      try {
+        const locked = await client.query(
+          `SELECT id, current_stock FROM inventory WHERE sku = ? FOR UPDATE`,
+          [DEFAULT_PRODUCT_SKU]
+        );
+        const inv = locked.rows[0];
+        if (inv) {
+          const previousStock = Number(inv.current_stock);
+          if (Number.isFinite(previousStock)) {
+            await client.query(
+              `UPDATE inventory
+               SET current_stock = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`,
+              [previousStock + qty, inv.id]
+            );
+          }
+        }
+      } catch (error) {
+        if (!isMissingTableError(error)) throw error;
+      }
+    }
+  }
+
+  try {
+    await client.query(`DELETE FROM inventory_history WHERE order_id = ?`, [orderId]);
+  } catch (error) {
+    if (isMissingTableError(error)) return { status: "skipped" };
+    throw error;
+  }
+
+  return { status: sale && !alreadyReversed ? "restored" : "cleared" };
+}
+
 async function aggregateSold(sku) {
   const { rows } = await query(
     `SELECT COALESCE(SUM(ABS(quantity_change)), 0) AS sold

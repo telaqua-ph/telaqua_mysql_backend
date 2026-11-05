@@ -43,12 +43,16 @@ export async function archiveDeletedOrder(client, { order, shipments = [], user 
     [
       order.id,
       order.order_number || null,
-      JSON.stringify(order),
-      shipments.length ? JSON.stringify(shipments) : null,
+      JSON.stringify(order, jsonReplacer),
+      shipments.length ? JSON.stringify(shipments, jsonReplacer) : null,
       Number.isInteger(adminId) && adminId > 0 ? adminId : null,
       user?.email ? String(user.email).slice(0, 255) : null,
     ]
   );
+}
+
+function jsonReplacer(_key, value) {
+  return typeof value === "bigint" ? value.toString() : value;
 }
 
 function parseJson(text, fallback) {

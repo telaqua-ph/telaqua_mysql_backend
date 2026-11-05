@@ -20,6 +20,7 @@ import {
   deductStockForSale,
   dispatchInventoryAlertEmails,
   restoreStockForCancellation,
+  undoInventoryForDeletedOrder,
 } from "../services/inventoryService.js";
 import {
   buildFinancialSnapshot,
@@ -1880,6 +1881,43 @@ export async function updateOrder(req, res) {
   }
 }
 
+function isRowReferencedError(error) {
+  return error?.code === "ER_ROW_IS_REFERENCED_2" || error?.errno === 1451;
+}
+
+function childTableFromFkError(error) {
+  const match = String(error?.message || "").match(/`[^`]+`\.`([A-Za-z0-9_]+)`/);
+  return match?.[1] || null;
+}
+
+/** Drop or detach the child row that blocked deleting an order. */
+async function clearReferencingRows(client, table, orderId) {
+  if (!/^[A-Za-z0-9_]+$/.test(table) || table === "orders") return;
+  if (table === "inventory_history" || table === "cod_advance_payments") {
+    try {
+      await client.query(`UPDATE \`${table}\` SET order_id = NULL WHERE order_id = ?`, [orderId]);
+      return;
+    } catch (error) {
+      if (error?.code !== "ER_BAD_NULL_ERROR" && !/cannot be null/i.test(String(error?.message || ""))) {
+        throw error;
+      }
+    }
+  }
+  if (table === "order_push_notifications") {
+    try {
+      await client.query(
+        `DELETE d FROM order_push_deliveries d
+         INNER JOIN order_push_notifications n ON n.id = d.notification_id
+         WHERE n.order_id = ?`,
+        [orderId]
+      );
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error;
+    }
+  }
+  await client.query(`DELETE FROM \`${table}\` WHERE order_id = ?`, [orderId]);
+}
+
 /** DELETE /api/orders/:id — restored */
 export async function deleteOrder(req, res) {
   let client;
@@ -1916,14 +1954,22 @@ export async function deleteOrder(req, res) {
     // Keep a full snapshot for the Deleted Orders card/list/CSV. If this fails,
     // the whole delete is rolled back so no order is ever lost.
     await archiveDeletedOrder(client, { order: found.rows[0], shipments, user: req.user });
-    await restoreStockForCancellation(client, {
+    await undoInventoryForDeletedOrder(client, {
       orderId: found.rows[0].id,
-      orderNumber: found.rows[0].order_number,
       quantity: found.rows[0].quantity,
-      adminId: Number(req.user?.admin_id) || null,
     });
     if (shipments.length) await client.query("DELETE FROM shipments WHERE order_id=?", [id]);
-    const deleted = await client.query("DELETE FROM orders WHERE id=?", [id]);
+    let deleted;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      try {
+        deleted = await client.query("DELETE FROM orders WHERE id=?", [id]);
+        break;
+      } catch (error) {
+        const table = childTableFromFkError(error);
+        if (!isRowReferencedError(error) || !table || attempt === 5) throw error;
+        await clearReferencingRows(client, table, id);
+      }
+    }
     await client.query("COMMIT");
 
     if (!deleted.rowCount) return res.status(404).json({ success: false, message: "Order not found" });
