@@ -1060,6 +1060,81 @@ export async function createOrder(req, res) {
   }
 }
 
+/**
+ * Offline Paid stays only on TAQ-001333.
+ * Every other order that was labeled COD Paid / Offline Paid goes back to Paid / cod.
+ * Safe to run again.
+ */
+export async function keepOfflinePaidOnlyOnOrder1333() {
+  try {
+    const found = await query(
+      `SELECT COLUMN_NAME AS column_name
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'orders'`
+    );
+    const columns = new Set(
+      found.rows.map((row) => String(row.column_name || row.COLUMN_NAME || "").toLowerCase())
+    );
+    if (!columns.has("payment_status") || !columns.has("payment_method") || !columns.has("order_number")) {
+      return { updated: 0 };
+    }
+
+    const keep = `(id = 1333 OR order_number = 'TAQ-001333')`;
+    const labeled = [
+      `LOWER(TRIM(COALESCE(payment_method, ''))) = 'offline paid'`,
+      `LOWER(TRIM(COALESCE(payment_status, ''))) IN ('offline paid', 'cod paid')`,
+    ];
+    if (columns.has("order_channel")) {
+      labeled.push(`LOWER(TRIM(COALESCE(order_channel, ''))) = 'admin'`);
+    }
+
+    const sets = [
+      `payment_method = CASE
+         WHEN LOWER(TRIM(COALESCE(payment_method, ''))) = 'offline paid' THEN 'cod'
+         ELSE payment_method
+       END`,
+      `payment_status = CASE
+         WHEN LOWER(TRIM(COALESCE(payment_status, ''))) IN ('offline paid', 'cod paid') THEN 'Paid'
+         ELSE payment_status
+       END`,
+    ];
+    if (columns.has("order_channel")) {
+      sets.push(`order_channel = CASE
+         WHEN LOWER(TRIM(COALESCE(order_channel, ''))) = 'admin' THEN NULL
+         ELSE order_channel
+       END`);
+    }
+
+    const cleared = await query(
+      `UPDATE orders
+       SET ${sets.join(", ")}
+       WHERE NOT ${keep}
+         AND (${labeled.join(" OR ")})`
+    );
+
+    const keepSets = [
+      `payment_method = 'Offline Paid'`,
+      `payment_status = 'COD Paid'`,
+    ];
+    if (columns.has("order_channel")) keepSets.push(`order_channel = 'admin'`);
+    await query(
+      `UPDATE orders
+       SET ${keepSets.join(", ")}
+       WHERE ${keep}`
+    );
+
+    const updated = Number(cleared.rowCount || 0);
+    if (updated) {
+      console.log("Offline Paid kept only on TAQ-001333:", { cleared: updated });
+    }
+    return { updated };
+  } catch (error) {
+    console.error("Offline Paid cleanup skipped:", error?.message || error);
+    return { updated: 0 };
+  }
+}
+
 /** POST /api/orders/manual-cod — admin-only COD order. Does not touch public POST /api/orders. */
 export async function createManualCodOrder(req, res) {
   const adminId = currentAdminId(req);

@@ -15,6 +15,7 @@ import { startIndiaPostTrackingSync, stopIndiaPostTrackingSync } from "./service
 import { startCheckoutReminderSync, stopCheckoutReminderSync } from "./services/checkoutReminderService.js";
 import { startOrderPushWorker, stopOrderPushWorker } from "./services/orderPushWorker.js";
 import { backfillCodOrderSales } from "./services/inventoryService.js";
+import { keepOfflinePaidOnlyOnOrder1333 } from "./controllers/orderController.js";
 import { isWebPushConfigured } from "./services/webPushConfig.js";
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -62,6 +63,9 @@ try {
     // Existing confirmed COD orders were never written to inventory history.
     backfillCodOrderSales().catch((error) => {
       console.error("COD inventory backfill error:", error?.message || error);
+    });
+    keepOfflinePaidOnlyOnOrder1333().catch((error) => {
+      console.error("Offline Paid cleanup error:", error?.message || error);
     });
   });
 
