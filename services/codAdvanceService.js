@@ -20,6 +20,7 @@ import { buildFinancialSnapshot, resolveOrderPricing } from "./orderPricing.js";
 import { assertStockAvailable, deductStockForSale, dispatchInventoryAlertEmails } from "./inventoryService.js";
 import { logPaymentEvent, triggerOrderFulfillmentAsync } from "./confirmRazorpayPayment.js";
 import { triggerOrderPlacedWhatsAppAsync } from "./interaktOrderPlacedService.js";
+import { triggerCalibrationVideoWhatsAppAsync } from "./interaktCalibrationVideoService.js";
 import { scheduleMetaPurchase } from "./metaPurchase.js";
 
 export const COD_ADVANCE_FEE_RUPEES = 99;
@@ -384,6 +385,13 @@ export async function finalizeCodAdvancePayment({ razorpayOrderId, razorpayPayme
     customerPhone: orderData.phone,
     orderId: created.orderNumber,
     orderAmount: created.finalTotal,
+  });
+  triggerCalibrationVideoWhatsAppAsync({
+    orderDbId: created.id,
+    customerName: orderData.customer_name,
+    customerPhone: orderData.phone,
+    orderId: created.orderNumber,
+    whatsappConsent: orderData.whatsapp_updates_consent,
   });
   scheduleMetaPurchase({ id: created.id });
 

@@ -14,6 +14,7 @@ import {
 } from "../services/whatsappConsent.js";
 import { logPaymentEvent, reconcileRazorpayOrder, triggerOrderFulfillmentAsync } from "../services/confirmRazorpayPayment.js";
 import { triggerOrderPlacedWhatsAppAsync } from "../services/interaktOrderPlacedService.js";
+import { triggerCalibrationVideoWhatsAppAsync } from "../services/interaktCalibrationVideoService.js";
 import { scheduleMetaPurchase } from "../services/metaPurchase.js";
 import {
   assertStockAvailable,
@@ -1310,6 +1311,12 @@ export async function createManualCodOrder(req, res) {
     }
 
     triggerOrderFulfillmentAsync(id);
+    triggerCalibrationVideoWhatsAppAsync({
+      orderDbId: id,
+      customerName: orderData.customer_name,
+      customerPhone: orderData.phone,
+      orderId: orderNumber,
+    });
 
     return res.status(201).json({
       success: true,
@@ -1633,6 +1640,13 @@ export async function createWebsiteCodOrder(req, res) {
       customerPhone: orderData.phone,
       orderId: orderNumber,
       orderAmount: financial.finalTotal,
+    });
+    triggerCalibrationVideoWhatsAppAsync({
+      orderDbId: id,
+      customerName: orderData.customer_name,
+      customerPhone: orderData.phone,
+      orderId: orderNumber,
+      whatsappConsent: orderData.whatsapp_updates_consent,
     });
     scheduleMetaPurchase({ id });
 

@@ -19,6 +19,7 @@ import {
   dispatchInventoryAlertEmails,
 } from "./inventoryService.js";
 import { triggerOrderPlacedWhatsAppAsync } from "./interaktOrderPlacedService.js";
+import { triggerCalibrationVideoWhatsAppAsync } from "./interaktCalibrationVideoService.js";
 import { scheduleMetaPurchase } from "./metaPurchase.js";
 
 /** Hostinger MySQL: resolve strings in JS — avoid mixed-collation COALESCE/NULLIF in SQL. */
@@ -489,6 +490,12 @@ export async function confirmCapturedRazorpayPayment({
     orderDbId: newlyPaid.id,
     orderId: newlyPaid.order_number,
     isTestOrder: newlyPaid.is_test_order,
+  });
+  triggerCalibrationVideoWhatsAppAsync({
+    orderDbId: newlyPaid.id,
+    orderId: newlyPaid.order_number,
+    isTestOrder: newlyPaid.is_test_order,
+    whatsappConsent: newlyPaid.whatsapp_updates_consent,
   });
 
   scheduleMetaPurchase(newlyPaid);
