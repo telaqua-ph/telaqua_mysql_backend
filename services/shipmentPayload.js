@@ -13,6 +13,9 @@ const clean = (value) =>
     .trim();
 
 function paymentModeOf(order) {
+  const pay = String(order?.payment_status || "").trim().toLowerCase();
+  const offlineSold = String(order?.offline_sold || "").trim().toLowerCase();
+  if (pay === "paid" || offlineSold.startsWith("cod paid")) return "Pre-paid";
   return /cod|cash/i.test(String(order?.payment_method || "")) ? "COD" : "Pre-paid";
 }
 

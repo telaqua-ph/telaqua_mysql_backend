@@ -413,6 +413,123 @@ function validateCreateOrder(body) {
   };
 }
 
+const OFFLINE_SOLD_OPTIONS = ["COD Pending", "COD Paid-Cash", "COD Paid-QR"];
+
+function offlineSaleFromChoice(value) {
+  const label = OFFLINE_SOLD_OPTIONS.find(
+    (item) => item.toLowerCase() === String(value || "").trim().toLowerCase()
+  );
+  if (!label) return null;
+  const paid = label !== "COD Pending";
+  return {
+    offline_sold: label,
+    payment_status: paid ? "Paid" : "Pending",
+    payment_method: "cod",
+  };
+}
+
+async function ensureOfflineSoldColumns() {
+  const found = await query(
+    `SELECT COLUMN_NAME AS column_name
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'orders'
+       AND COLUMN_NAME IN ('offline_sold', 'order_channel')`
+  );
+  const columns = new Set(
+    found.rows.map((row) => String(row.column_name || row.COLUMN_NAME || "").toLowerCase())
+  );
+  if (!columns.has("offline_sold")) {
+    await query(`ALTER TABLE orders ADD COLUMN offline_sold VARCHAR(32) NULL`);
+  }
+  if (!columns.has("order_channel")) {
+    await query(`ALTER TABLE orders ADD COLUMN order_channel VARCHAR(32) NULL`);
+  }
+}
+
+/**
+ * Past Add COD Order rows have no website invoice token and no website visit.
+ * Move those rows into Offline Sold. Paid ones become COD Paid-Cash.
+ * Pending ones become COD Pending. Rows already labeled are left as entered.
+ */
+export async function backfillOfflineSoldOrders() {
+  try {
+    await ensureOfflineSoldColumns();
+    const found = await query(
+      `SELECT COLUMN_NAME AS column_name
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'orders'`
+    );
+    const columns = new Set(
+      found.rows.map((row) => String(row.column_name || row.COLUMN_NAME || "").toLowerCase())
+    );
+    if (!columns.has("offline_sold") || !columns.has("payment_mode") || !columns.has("payment_method")) {
+      return { updated: 0 };
+    }
+
+    const blank = (column) => `(${column} IS NULL OR ${column} = '')`;
+    const adminMarks = [
+      `LOWER(TRIM(COALESCE(payment_method, ''))) = 'offline paid'`,
+      `LOWER(TRIM(COALESCE(payment_status, ''))) IN ('offline paid', 'cod paid')`,
+    ];
+    if (columns.has("order_channel")) {
+      adminMarks.push(`LOWER(TRIM(COALESCE(order_channel, ''))) = 'admin'`);
+    }
+    const fingerprint = [
+      `LOWER(TRIM(COALESCE(payment_method, ''))) IN ('cod', 'offline paid')`,
+    ];
+    if (columns.has("invoice_access_token_hash")) fingerprint.push(blank("invoice_access_token_hash"));
+    for (const column of [
+      "razorpay_order_id",
+      "landing_url",
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "gclid",
+      "fbclid",
+      "fbp",
+      "fbc",
+    ]) {
+      if (columns.has(column)) fingerprint.push(blank(column));
+    }
+    if (columns.has("whatsapp_consent_at")) fingerprint.push(`whatsapp_consent_at IS NULL`);
+    if (columns.has("order_channel")) fingerprint.push(blank("order_channel"));
+
+    const sets = [
+      `offline_sold = CASE
+         WHEN LOWER(TRIM(COALESCE(payment_status, ''))) = 'pending' THEN 'COD Pending'
+         ELSE 'COD Paid-Cash'
+       END`,
+      `payment_status = CASE
+         WHEN LOWER(TRIM(COALESCE(payment_status, ''))) = 'pending' THEN 'Pending'
+         WHEN LOWER(TRIM(COALESCE(payment_status, ''))) IN ('paid', 'cod paid', 'offline paid') THEN 'Paid'
+         ELSE payment_status
+       END`,
+      `payment_method = CASE
+         WHEN LOWER(TRIM(COALESCE(payment_method, ''))) = 'offline paid' THEN 'cod'
+         ELSE payment_method
+       END`,
+    ];
+    if (columns.has("order_channel")) sets.push(`order_channel = 'admin'`);
+
+    const result = await query(
+      `UPDATE orders
+       SET ${sets.join(", ")}
+       WHERE (offline_sold IS NULL OR offline_sold = '')
+         AND LOWER(TRIM(COALESCE(payment_mode, ''))) = 'cod'
+         AND LOWER(TRIM(COALESCE(order_status, ''))) NOT IN ('cancelled', 'canceled')
+         AND (${adminMarks.join(" OR ")} OR (${fingerprint.join(" AND ")}))`
+    );
+    const updated = Number(result.rowCount || 0);
+    if (updated) console.log("Past Add COD orders moved to Offline Sold:", { updated });
+    return { updated };
+  } catch (error) {
+    console.error("Offline Sold backfill skipped:", error?.message || error);
+    return { updated: 0 };
+  }
+}
+
 function validateManualCodOrder(body) {
   if (!body || typeof body !== "object") {
     return { error: "Invalid JSON body" };
@@ -484,6 +601,10 @@ function validateManualCodOrder(body) {
   if (!Number.isFinite(total_amount) || total_amount <= 0) {
     return { error: "total_amount must be a positive number" };
   }
+  const offlineSale = offlineSaleFromChoice(body.offline_sold);
+  if (!offlineSale) {
+    return { error: "Choose Offline Sold: COD Pending, COD Paid-Cash, or COD Paid-QR" };
+  }
 
   const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
   if (suppliedEmail && !isValidEmail(suppliedEmail)) {
@@ -504,6 +625,7 @@ function validateManualCodOrder(body) {
       unit_price,
       total_amount,
       promo_code,
+      ...offlineSale,
     },
   };
 }
@@ -1156,6 +1278,7 @@ export async function createManualCodOrder(req, res) {
     }
 
     const orderData = validation.data;
+    await ensureOfflineSoldColumns();
 
     const stockCheck = await assertStockAvailable(orderData.quantity);
     if (!stockCheck.ok) {
@@ -1209,12 +1332,14 @@ export async function createManualCodOrder(req, res) {
             final_total,
             invoice_status,
             whatsapp_updates_consent,
-            whatsapp_consent_at
+            whatsapp_consent_at,
+            offline_sold,
+            order_channel
           ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'cod', 'Pending', 'Confirmed', 'cod',
+            ?, ?, 'Confirmed', 'cod',
             ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'not_created', 0, NULL
+            'not_created', 0, NULL, ?, 'admin'
           )`,
           [
             orderData.customer_name,
@@ -1227,6 +1352,8 @@ export async function createManualCodOrder(req, res) {
             orderData.quantity,
             pricing.unit_price,
             financial.finalTotal,
+            orderData.payment_method,
+            orderData.payment_status,
             pricing.promo_code,
             pricing.original_amount,
             pricing.discount_amount,
@@ -1236,6 +1363,7 @@ export async function createManualCodOrder(req, res) {
             financial.gstRate,
             financial.shippingAmount,
             financial.finalTotal,
+            orderData.offline_sold,
           ]
         );
       } else {
@@ -1256,9 +1384,11 @@ export async function createManualCodOrder(req, res) {
             order_status,
             payment_mode,
             whatsapp_updates_consent,
-            whatsapp_consent_at
+            whatsapp_consent_at,
+            offline_sold,
+            order_channel
           ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod', 0, NULL
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Confirmed', 'cod', 0, NULL, ?, 'admin'
           )`,
           [
             orderData.customer_name,
@@ -1271,6 +1401,9 @@ export async function createManualCodOrder(req, res) {
             orderData.quantity,
             orderData.unit_price,
             orderData.total_amount,
+            orderData.payment_method,
+            orderData.payment_status,
+            orderData.offline_sold,
           ]
         );
       }
@@ -1293,6 +1426,16 @@ export async function createManualCodOrder(req, res) {
        WHERE id = ?`,
       [orderNumber, id]
     );
+    if (orderData.payment_status === "Paid") {
+      try {
+        await query(
+          `UPDATE orders SET payment_date = COALESCE(payment_date, CURRENT_TIMESTAMP) WHERE id = ?`,
+          [id]
+        );
+      } catch (error) {
+        if (!isMissingColumnError(error, "payment_date")) throw error;
+      }
+    }
 
     const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
 
