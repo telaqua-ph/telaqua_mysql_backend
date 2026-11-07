@@ -413,17 +413,26 @@ function validateCreateOrder(body) {
   };
 }
 
-const OFFLINE_SOLD_OPTIONS = ["COD Pending", "COD Paid-Cash", "COD Paid-QR"];
+const OFFLINE_SOLD_OPTIONS = ["COD Paid-Cash", "COD Paid-QR"];
 
 function offlineSaleFromChoice(value) {
+  const raw = String(value || "").trim();
+  // Orders-page Add COD Order sends no paid type. That is a normal pending COD
+  // and must stay off the Offline Sold list.
+  if (!raw || raw.toLowerCase() === "cod pending") {
+    return {
+      offline_sold: null,
+      payment_status: "Pending",
+      payment_method: "cod",
+    };
+  }
   const label = OFFLINE_SOLD_OPTIONS.find(
-    (item) => item.toLowerCase() === String(value || "").trim().toLowerCase()
+    (item) => item.toLowerCase() === raw.toLowerCase()
   );
   if (!label) return null;
-  const paid = label !== "COD Pending";
   return {
     offline_sold: label,
-    payment_status: paid ? "Paid" : "Pending",
+    payment_status: "Paid",
     payment_method: "cod",
   };
 }
@@ -448,9 +457,9 @@ async function ensureOfflineSoldColumns() {
 }
 
 /**
- * Past Add COD Order rows have no website invoice token and no website visit.
- * Move those rows into Offline Sold. Paid ones become COD Paid-Cash.
- * Pending ones become COD Pending. Rows already labeled are left as entered.
+ * Past paid Add COD Order rows have no website invoice token and no website visit.
+ * Move those paid rows into Offline Sold as COD Paid-Cash.
+ * Pending COD stays pending and is removed from Offline Sold.
  */
 export async function backfillOfflineSoldOrders() {
   try {
@@ -497,12 +506,8 @@ export async function backfillOfflineSoldOrders() {
     if (columns.has("order_channel")) fingerprint.push(blank("order_channel"));
 
     const sets = [
-      `offline_sold = CASE
-         WHEN LOWER(TRIM(COALESCE(payment_status, ''))) = 'pending' THEN 'COD Pending'
-         ELSE 'COD Paid-Cash'
-       END`,
+      `offline_sold = 'COD Paid-Cash'`,
       `payment_status = CASE
-         WHEN LOWER(TRIM(COALESCE(payment_status, ''))) = 'pending' THEN 'Pending'
          WHEN LOWER(TRIM(COALESCE(payment_status, ''))) IN ('paid', 'cod paid', 'offline paid') THEN 'Paid'
          ELSE payment_status
        END`,
@@ -518,12 +523,21 @@ export async function backfillOfflineSoldOrders() {
        SET ${sets.join(", ")}
        WHERE (offline_sold IS NULL OR offline_sold = '')
          AND LOWER(TRIM(COALESCE(payment_mode, ''))) = 'cod'
+         AND LOWER(TRIM(COALESCE(payment_status, ''))) <> 'pending'
          AND LOWER(TRIM(COALESCE(order_status, ''))) NOT IN ('cancelled', 'canceled')
          AND (${adminMarks.join(" OR ")} OR (${fingerprint.join(" AND ")}))`
     );
+    const cleared = await query(
+      `UPDATE orders
+       SET offline_sold = NULL
+       WHERE LOWER(TRIM(COALESCE(offline_sold, ''))) = 'cod pending'`
+    );
     const updated = Number(result.rowCount || 0);
-    if (updated) console.log("Past Add COD orders moved to Offline Sold:", { updated });
-    return { updated };
+    const removed = Number(cleared.rowCount || 0);
+    if (updated || removed) {
+      console.log("Offline Sold sync:", { paidMoved: updated, pendingCleared: removed });
+    }
+    return { updated, removed };
   } catch (error) {
     console.error("Offline Sold backfill skipped:", error?.message || error);
     return { updated: 0 };
@@ -603,7 +617,7 @@ function validateManualCodOrder(body) {
   }
   const offlineSale = offlineSaleFromChoice(body.offline_sold);
   if (!offlineSale) {
-    return { error: "Choose Offline Sold: COD Pending, COD Paid-Cash, or COD Paid-QR" };
+    return { error: "Choose Offline Sold: COD Paid-Cash or COD Paid-QR" };
   }
 
   const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
@@ -869,7 +883,7 @@ export async function listOrders(req, res) {
   }
 }
 
-/** POST /api/orders/export â€” validated export rows for the Orders page. */
+/** POST /api/orders/export — validated export rows for the Orders page. */
 export async function exportOrders(req, res) {
   const adminId = currentAdminId(req);
   if (!adminId) return res.status(401).json({ success: false, message: "Unauthorized" });

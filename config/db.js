@@ -30,6 +30,8 @@ const mysqlPool = mysql.createPool({
   database: dbName || undefined,
   user: dbUser || undefined,
   password: dbPassword,
+  // Match the utf8mb4 tables. Unicode collation is the mysql2 default; keep it explicit.
+  charset: "UTF8MB4_UNICODE_CI",
   waitForConnections: true,
   connectionLimit: Number(process.env.DB_POOL_MAX) || 10,
   queueLimit: 0,
