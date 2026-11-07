@@ -9,7 +9,7 @@ const LABELS = Object.freeze({
   out_for_delivery: "Out for Delivery",
   delivered: "Delivered",
   rto: "RTO In-Transit",
-  returned: "RTO",
+  returned: "RTO Delivered",
   cancelled: "Cancelled",
   delivery_failed: "Delivery Failed",
   pickup_failed: "Pickup Failed",
