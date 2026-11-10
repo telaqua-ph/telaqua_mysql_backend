@@ -193,9 +193,10 @@ export function buildIndiaPostArticle(order, { barcode = "", weightGrams, config
     article_type: config.articleType,
     physical_weight: num(weightGrams, config.weightGrams),
     shape_of_article: "NROL",
-    length: config.lengthCm,
-    breadth_diameter: config.breadthCm,
-    height: config.heightCm,
+    // India Post expects dimensions in millimetres (API onboarding guide); settings are in cm.
+    length: Math.round(config.lengthCm * 10),
+    breadth_diameter: Math.round(config.breadthCm * 10),
+    height: Math.round(config.heightCm * 10),
     instruction_rts: "RTS",
     sender_name: config.sender.name,
     sender_company: config.sender.company,
