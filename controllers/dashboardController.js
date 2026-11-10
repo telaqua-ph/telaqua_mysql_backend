@@ -552,11 +552,12 @@ async function fetchDashboardStats({ adminId, from, to }) {
        SELECT
          /* These three summaries share their contributing CTEs with the
           * preset tiles; only the same explicit IST date range changes. */
+         /* Selected-period Devices Sold matches the "Total Devices Sold"
+          * tiles: paid devices plus confirmed COD devices not yet paid. */
          CAST(COALESCE((
            SELECT SUM(quantity)
            FROM device_orders
-           WHERE is_paid = 1
-             AND (? IS NULL OR device_counted_at >= ${istDateParameterStartExpression("?")})
+           WHERE (? IS NULL OR device_counted_at >= ${istDateParameterStartExpression("?")})
              AND (? IS NULL OR device_counted_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0) AS SIGNED) AS analysis_devices_sold,
          CAST(COALESCE((
