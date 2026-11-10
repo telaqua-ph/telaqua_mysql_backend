@@ -377,12 +377,13 @@ async function fetchDashboardStats({ adminId, from, to }) {
     : "";
   const codAdvanceCte = columns.has("cod_advance_fee") && columns.has("cod_advance_status")
     ? `SELECT COALESCE(cod_advance_fee, 0) AS advance_amount,
-         ${columns.has("cod_advance_verified_at") ? `COALESCE(cod_advance_verified_at, ${createdDateExpr})` : createdDateExpr} AS advance_paid_at
+         ${columns.has("cod_advance_verified_at") ? `COALESCE(cod_advance_verified_at, ${createdDateExpr})` : createdDateExpr} AS advance_paid_at,
+         ${createdDateExpr} AS advance_ordered_at
        FROM orders
        WHERE LOWER(TRIM(COALESCE(cod_advance_status, ''))) = 'paid'
          AND COALESCE(cod_advance_fee, 0) > 0
          ${paidTestFilter}`
-    : "SELECT 0 AS advance_amount, NULL AS advance_paid_at FROM DUAL WHERE FALSE";
+    : "SELECT 0 AS advance_amount, NULL AS advance_paid_at, NULL AS advance_ordered_at FROM DUAL WHERE FALSE";
 
   const { rows } = await query(
     `WITH order_rows AS (
@@ -456,7 +457,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
        GROUP BY id
      ),
      paid_orders AS (
-       SELECT *, ${paidDateExpr} AS paid_at
+       SELECT *, ${paidDateExpr} AS paid_at, ${createdDateExpr} AS ordered_at
        FROM orders
        WHERE ${paymentStatusExpr} = 'Paid'
          AND LOWER(${orderStatusExpr}) <> 'cancelled'
@@ -563,14 +564,17 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(COALESCE((
            SELECT SUM(${revenueExpr})
            FROM paid_orders
-           WHERE (? IS NULL OR paid_at >= ${istDateParameterStartExpression("?")})
-             AND (? IS NULL OR paid_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
+           /* Date-filtered revenue is attributed to the order date (e.g. COD
+            * ordered 1 Nov, cash collected later, counts on 1 Nov). The
+            * Sales overview tiles above stay on the payment date. */
+           WHERE (? IS NULL OR ordered_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR ordered_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0)
          + COALESCE((
            SELECT SUM(advance_amount)
            FROM cod_advances
-           WHERE (? IS NULL OR advance_paid_at >= ${istDateParameterStartExpression("?")})
-             AND (? IS NULL OR advance_paid_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
+           WHERE (? IS NULL OR advance_ordered_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR advance_ordered_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0) AS DECIMAL(12,2)) AS analysis_revenue_received,
          CAST(COALESCE((
            SELECT SUM(${revenueExpr})
