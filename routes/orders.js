@@ -13,6 +13,7 @@ import {
   collectBulkCodPayments,
   getOrderById,
   updateOrder,
+  updateShipmentStatus,
   deleteOrder,
   markOrderSeen,
   reconcileRazorpayPayment,
@@ -71,6 +72,7 @@ router.get("/:id/delivery-details/history", requireAuth, requireActiveAdmin, get
 router.patch("/:id/delivery-details", requireAuth, requireActiveAdmin, updateOrderDeliveryDetails);
 router.get("/:id", getOrderById);
 router.patch("/:id/cod-payment", requireAuth, collectCodPayment);
+router.patch("/:id/shipment-status", requireAuth, requireActiveAdmin, updateShipmentStatus);
 router.put("/:id", requireAuth, updateOrder);
 router.delete("/:id", requireAuth, deleteOrder);
 

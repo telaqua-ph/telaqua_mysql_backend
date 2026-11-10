@@ -1971,6 +1971,127 @@ export async function getOrderById(req, res) {
   }
 }
 
+// Manual shipment statuses an admin can set from the Orders list.
+// `label` is stored as the carrier-style status so the display mapping
+// (deriveShipmentStatusDisplay) renders it the same way as a courier scan.
+export const MANUAL_SHIPMENT_STATUSES = Object.freeze({
+  picked_up: { fulfillment: "picked_up", label: "Picked Up" },
+  in_transit: { fulfillment: "in_transit", label: "In Transit" },
+  out_for_delivery: { fulfillment: "out_for_delivery", label: "Out for Delivery" },
+  delivered: { fulfillment: "delivered", label: "Delivered" },
+  rto_in_transit: { fulfillment: "rto", label: "RTO In-Transit" },
+  rto_delivered: { fulfillment: "returned", label: "RTO Delivered" },
+});
+
+/** PATCH /api/orders/:id/shipment-status — admin manual shipment status override. */
+export async function updateShipmentStatus(req, res) {
+  try {
+    const id = parseOrderId(req.params.id);
+    if (id === null) {
+      return res.status(400).json({ success: false, message: "Invalid order id" });
+    }
+    const key = trimStr(req.body?.status).toLowerCase();
+    const target = MANUAL_SHIPMENT_STATUSES[key];
+    if (!target) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Allowed values: ${Object.keys(MANUAL_SHIPMENT_STATUSES).join(", ")}`,
+      });
+    }
+
+    const found = await query(`SELECT id, fulfillment_status FROM orders WHERE id = ?`, [id]);
+    if (found.rows.length === 0) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+    const prior = found.rows[0];
+    const isDelivered = target.fulfillment === "delivered" ? 1 : 0;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      await client.query(
+        `UPDATE orders
+         SET fulfillment_status = ?, tracking_status = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`,
+        [target.fulfillment, target.label, id]
+      );
+
+      let shipment = null;
+      try {
+        const { rows } = await client.query(
+          `SELECT id, fulfillment_status, shipment_status FROM shipments
+           WHERE order_id = ? AND sequence_no = 1`,
+          [id]
+        );
+        shipment = rows[0] || null;
+      } catch (error) {
+        if (error?.code !== "ER_NO_SUCH_TABLE") throw error;
+      }
+
+      if (shipment) {
+        // shipment_status_at = NOW() so older courier events can't overwrite this manual update.
+        await client.query(
+          `UPDATE shipments SET
+             fulfillment_status = ?,
+             shipment_status = ?,
+             shipment_status_code = NULL,
+             shipment_status_at = NOW(),
+             pickup_status = CASE WHEN ? = 'picked_up' THEN 'Picked Up' ELSE pickup_status END,
+             delivered_at = CASE WHEN ? = 1 THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+             last_error = NULL
+           WHERE id = ?`,
+          [target.fulfillment, target.label, target.fulfillment, isDelivered, shipment.id]
+        );
+        try {
+          await client.query(
+            `INSERT INTO shipment_audit_log (shipment_id, admin_id, action, before_data, after_data)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+              shipment.id,
+              Number(req.user?.admin_id) || null,
+              "manual_shipment_status_update",
+              JSON.stringify({
+                fulfillment_status: shipment.fulfillment_status,
+                shipment_status: shipment.shipment_status,
+              }),
+              JSON.stringify({ fulfillment_status: target.fulfillment, shipment_status: target.label }),
+            ]
+          );
+        } catch (error) {
+          if (!isMissingTableError(error)) throw error;
+        }
+      }
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
+    const [withShipment] = await attachLatestShipments(rows);
+    const [withCancellationFlag] = await attachCancellationFlags([withShipment]);
+    const {
+      invoice_access_token_hash: _hash,
+      invoice_attempt_token: _attempt,
+      ...safeOrder
+    } = withCancellationFlag;
+
+    return res.status(200).json({
+      success: true,
+      message: `Shipment status updated to ${target.label}`,
+      previous_fulfillment_status: prior.fulfillment_status,
+      order: withDisplayStatuses(safeOrder),
+    });
+  } catch (error) {
+    console.error("Update shipment status API error:", error);
+    return res.status(500).json({ success: false, message: "Internal server error" });
+  }
+}
+
 /** PUT /api/orders/:id */
 export async function updateOrder(req, res) {
   try {
