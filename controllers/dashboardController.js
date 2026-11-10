@@ -220,18 +220,32 @@ export function deviceConfirmationPredicate(columns, alias = "") {
   )`;
 }
 
+/**
+ * Offline Sold orders with a Purchased On date ('YYYY-MM-DD', IST) are dated by
+ * that day for both their sale and payment. NULL for every other order.
+ */
+function purchasedOnExpression(columns, alias = "") {
+  if (!columns.has("purchased_on")) return null;
+  const column = `${alias ? `${alias}.` : ""}purchased_on`;
+  return `CASE WHEN ${column} REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+    THEN ${istDateParameterStartExpression(column)} END`;
+}
+
 function paidDateExpression(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
-  if (columns.has("payment_date") && columns.has("created_at")) {
-    return `COALESCE(${prefix}payment_date, ${prefix}created_at)`;
-  }
-  if (columns.has("payment_date")) return `${prefix}payment_date`;
-  if (columns.has("created_at")) return `${prefix}created_at`;
-  return "NULL";
+  const dates = [];
+  const purchasedOn = purchasedOnExpression(columns, alias);
+  if (purchasedOn) dates.push(purchasedOn);
+  if (columns.has("payment_date")) dates.push(`${prefix}payment_date`);
+  if (columns.has("created_at")) dates.push(`${prefix}created_at`);
+  if (!dates.length) return "NULL";
+  return dates.length === 1 ? dates[0] : `COALESCE(${dates.join(", ")})`;
 }
 
 function createdDateExpression(columns, alias = "") {
-  return columns.has("created_at") ? `${alias ? `${alias}.` : ""}created_at` : "NULL";
+  const createdAt = columns.has("created_at") ? `${alias ? `${alias}.` : ""}created_at` : "NULL";
+  const purchasedOn = purchasedOnExpression(columns, alias);
+  return purchasedOn ? `COALESCE(${purchasedOn}, ${createdAt})` : createdAt;
 }
 
 /**

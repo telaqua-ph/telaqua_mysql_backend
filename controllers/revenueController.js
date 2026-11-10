@@ -82,6 +82,19 @@ export function codAdvanceSelect(columns) {
       ${testFilter}`;
 }
 
+/**
+ * The date an order's revenue belongs to. Offline Sold (cash / QR) orders with
+ * a Purchased On date count on that IST calendar date; every other order keeps
+ * its order (created_at) date.
+ */
+export function saleDateExpression(columns) {
+  const createdAt = columns.has("created_at") ? "created_at" : "NULL";
+  if (!columns.has("purchased_on")) return createdAt;
+  return `COALESCE(CASE
+      WHEN purchased_on REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN ${istStart("purchased_on")}
+    END, ${createdAt})`;
+}
+
 function istDayExpression(timestamp) {
   return `TIMESTAMPADD(MINUTE, TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()) + 330, ${timestamp})`;
 }
@@ -96,7 +109,7 @@ export async function getRevenueReport(req, res) {
   try {
     const columns = await orderColumns();
     const amount = amountExpression(columns);
-    const createdAt = columns.has("created_at") ? "created_at" : "NULL";
+    const createdAt = saleDateExpression(columns);
     const cod = codPredicate(columns);
     const confirmed = confirmedPredicate(columns);
     const testFilter = columns.has("is_test_order") ? "AND COALESCE(is_test_order, 0) = 0" : "";
