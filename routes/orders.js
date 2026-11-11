@@ -14,6 +14,7 @@ import {
   getOrderById,
   updateOrder,
   updateShipmentStatus,
+  updateOrderPurchasedOn,
   deleteOrder,
   markOrderSeen,
   reconcileRazorpayPayment,
@@ -73,6 +74,7 @@ router.patch("/:id/delivery-details", requireAuth, requireActiveAdmin, updateOrd
 router.get("/:id", getOrderById);
 router.patch("/:id/cod-payment", requireAuth, collectCodPayment);
 router.patch("/:id/shipment-status", requireAuth, requireActiveAdmin, updateShipmentStatus);
+router.patch("/:id/purchased-on", requireAuth, requireActiveAdmin, updateOrderPurchasedOn);
 router.put("/:id", requireAuth, updateOrder);
 router.delete("/:id", requireAuth, deleteOrder);
 

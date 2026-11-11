@@ -439,21 +439,47 @@ function offlineSaleFromChoice(value) {
 
 async function ensureOfflineSoldColumns() {
   const found = await query(
-    `SELECT COLUMN_NAME AS column_name
+    `SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type
      FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA = DATABASE()
        AND TABLE_NAME = 'orders'
-       AND COLUMN_NAME IN ('offline_sold', 'order_channel')`
+       AND COLUMN_NAME IN ('offline_sold', 'order_channel', 'purchased_on')`
   );
   const columns = new Set(
     found.rows.map((row) => String(row.column_name || row.COLUMN_NAME || "").toLowerCase())
   );
+  const purchasedOnType = found.rows.find(
+    (row) => String(row.column_name || row.COLUMN_NAME || "").toLowerCase() === "purchased_on"
+  );
+  // Stored as 'YYYY-MM-DD' text so the driver never shifts the calendar day by
+  // the server timezone (a DATE column comes back as a JS Date at local midnight).
+  if (purchasedOnType && String(purchasedOnType.data_type || purchasedOnType.DATA_TYPE || "").toLowerCase() === "date") {
+    await query(`ALTER TABLE orders MODIFY COLUMN purchased_on VARCHAR(10) NULL`);
+  }
   if (!columns.has("offline_sold")) {
     await query(`ALTER TABLE orders ADD COLUMN offline_sold VARCHAR(32) NULL`);
   }
   if (!columns.has("order_channel")) {
     await query(`ALTER TABLE orders ADD COLUMN order_channel VARCHAR(32) NULL`);
   }
+  if (!columns.has("purchased_on")) {
+    await query(`ALTER TABLE orders ADD COLUMN purchased_on VARCHAR(10) NULL`);
+  }
+}
+
+/** Today's date (YYYY-MM-DD) in India time, so "today" matches the admin's calendar. */
+function todayInIndia() {
+  return new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+/** Purchased On must be a real YYYY-MM-DD date, not in the future. */
+function parsePurchasedOn(value) {
+  const raw = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const date = new Date(`${raw}T00:00:00Z`);
+  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== raw) return null;
+  if (raw > todayInIndia()) return null;
+  return raw;
 }
 
 /**
@@ -620,6 +646,18 @@ function validateManualCodOrder(body) {
     return { error: "Choose Offline Sold: COD Paid-Cash or COD Paid-QR" };
   }
 
+  // Purchased On is required for Offline Sold (cash / QR) orders only.
+  let purchased_on = null;
+  if (offlineSale.offline_sold) {
+    if (!trimStr(body.purchased_on)) {
+      return { error: "purchased_on is required" };
+    }
+    purchased_on = parsePurchasedOn(body.purchased_on);
+    if (!purchased_on) {
+      return { error: "purchased_on must be a valid date that is not in the future" };
+    }
+  }
+
   const suppliedEmail = typeof emailRaw === "string" ? emailRaw.trim() : "";
   if (suppliedEmail && !isValidEmail(suppliedEmail)) {
     return { error: "email must be a valid email address" };
@@ -639,6 +677,7 @@ function validateManualCodOrder(body) {
       unit_price,
       total_amount,
       promo_code,
+      purchased_on,
       ...offlineSale,
     },
   };
@@ -1273,6 +1312,42 @@ export async function keepOfflinePaidOnlyOnOrder1333() {
 }
 
 /** POST /api/orders/manual-cod — admin-only COD order. Does not touch public POST /api/orders. */
+/** PATCH /api/orders/:id/purchased-on — set or correct Purchased On for an Offline Sold order. */
+export async function updateOrderPurchasedOn(req, res) {
+  if (!currentAdminId(req)) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
+  const id = parseOrderId(req.params.id);
+  if (!id) return res.status(400).json({ success: false, message: "Invalid order id" });
+
+  const purchasedOn = parsePurchasedOn(req.body?.purchased_on);
+  if (!purchasedOn) {
+    return res.status(400).json({
+      success: false,
+      message: "Purchased On must be a valid date that is not in the future",
+    });
+  }
+
+  try {
+    await ensureOfflineSoldColumns();
+    const { rows: found } = await query(`SELECT id, offline_sold FROM orders WHERE id = ?`, [id]);
+    if (!found[0]) return res.status(404).json({ success: false, message: "Order not found" });
+    if (!offlineSaleFromChoice(found[0].offline_sold)?.offline_sold) {
+      return res.status(400).json({
+        success: false,
+        message: "Purchased On can only be set on Offline Sold (cash / QR) orders",
+      });
+    }
+    await query(`UPDATE orders SET purchased_on = ? WHERE id = ?`, [purchasedOn, id]);
+    const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
+    const { invoice_access_token_hash: _hash, invoice_attempt_token: _attempt, ...order } = rows[0] || {};
+    return res.status(200).json({ success: true, order });
+  } catch (error) {
+    console.error("Purchased On update failed:", { id, message: error?.message });
+    return res.status(500).json({ success: false, message: "Unable to update Purchased On." });
+  }
+}
+
 export async function createManualCodOrder(req, res) {
   const adminId = currentAdminId(req);
   if (!adminId) {
@@ -1440,6 +1515,9 @@ export async function createManualCodOrder(req, res) {
        WHERE id = ?`,
       [orderNumber, id]
     );
+    if (orderData.purchased_on) {
+      await query(`UPDATE orders SET purchased_on = ? WHERE id = ?`, [orderData.purchased_on, id]);
+    }
     if (orderData.payment_status === "Paid") {
       try {
         await query(

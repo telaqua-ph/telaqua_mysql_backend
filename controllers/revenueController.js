@@ -37,14 +37,6 @@ function amountExpression(columns) {
   return "0";
 }
 
-function paidAtExpression(columns) {
-  if (columns.has("payment_date") && columns.has("created_at")) {
-    return "COALESCE(payment_date, created_at)";
-  }
-  if (columns.has("payment_date")) return "payment_date";
-  return columns.has("created_at") ? "created_at" : "NULL";
-}
-
 function codPredicate(columns) {
   const mode = columns.has("payment_mode");
   const method = columns.has("payment_method");
@@ -69,7 +61,7 @@ function confirmedPredicate(columns) {
 /**
  * Paid ₹99 COD advance delivery charges. The ₹99 is collected online (Razorpay)
  * when the COD order is placed and is non-refundable, so it is revenue received
- * on the day it was verified, even while the product amount is still pending.
+ * on the order date, even while the product amount is still pending.
  * It is stored separately (cod_advance_fee) from the product amount
  * (final_total), so the two are never double counted.
  */
@@ -77,19 +69,30 @@ export function codAdvanceSelect(columns) {
   if (!columns.has("cod_advance_fee") || !columns.has("cod_advance_status")) {
     return "SELECT NULL AS id, NULL AS order_number, 0 AS amount, NULL AS accounting_at, 'Razorpay' AS payment_mode, '' AS payment_status, 'advance' AS bucket FROM DUAL WHERE FALSE";
   }
+  // Date-filtered revenue is attributed to the order date.
   const createdAt = columns.has("created_at") ? "created_at" : "NULL";
-  const paidAt = columns.has("cod_advance_verified_at")
-    ? `COALESCE(cod_advance_verified_at, ${createdAt})`
-    : createdAt;
   const testFilter = columns.has("is_test_order") ? "AND COALESCE(is_test_order, 0) = 0" : "";
   const orderNumber = columns.has("order_number") ? "order_number" : "NULL";
   return `SELECT id, ${orderNumber} AS order_number, COALESCE(cod_advance_fee, 0) AS amount,
-      ${paidAt} AS accounting_at, 'Razorpay' AS payment_mode,
+      ${createdAt} AS accounting_at, 'Razorpay' AS payment_mode,
       'Advance Paid' AS payment_status, 'advance' AS bucket
     FROM orders
     WHERE LOWER(TRIM(COALESCE(cod_advance_status, ''))) = 'paid'
       AND COALESCE(cod_advance_fee, 0) > 0
       ${testFilter}`;
+}
+
+/**
+ * The date an order's revenue belongs to. Offline Sold (cash / QR) orders with
+ * a Purchased On date count on that IST calendar date; every other order keeps
+ * its order (created_at) date.
+ */
+export function saleDateExpression(columns) {
+  const createdAt = columns.has("created_at") ? "created_at" : "NULL";
+  if (!columns.has("purchased_on")) return createdAt;
+  return `COALESCE(CASE
+      WHEN purchased_on REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN ${istStart("purchased_on")}
+    END, ${createdAt})`;
 }
 
 function istDayExpression(timestamp) {
@@ -106,8 +109,7 @@ export async function getRevenueReport(req, res) {
   try {
     const columns = await orderColumns();
     const amount = amountExpression(columns);
-    const paidAt = paidAtExpression(columns);
-    const createdAt = columns.has("created_at") ? "created_at" : "NULL";
+    const createdAt = saleDateExpression(columns);
     const cod = codPredicate(columns);
     const confirmed = confirmedPredicate(columns);
     const testFilter = columns.has("is_test_order") ? "AND COALESCE(is_test_order, 0) = 0" : "";
@@ -116,7 +118,9 @@ export async function getRevenueReport(req, res) {
 
     const { rows } = await query(
       `WITH received AS (
-        SELECT id, order_number, ${amount} AS amount, ${paidAt} AS accounting_at,
+        /* Received revenue is attributed to the ORDER date: a COD order placed
+         * on 1 Nov whose cash is collected later counts on 1 Nov. */
+        SELECT id, order_number, ${amount} AS amount, ${createdAt} AS accounting_at,
           CASE WHEN ${cod} THEN 'COD' ELSE 'Razorpay' END AS payment_mode,
           ${paymentStatus} AS payment_status, 'received' AS bucket
         FROM orders

@@ -71,7 +71,9 @@ async function runSuite() {
 
     const report = calls.find((c) => c.sql.includes("FROM contributing"));
     assert.match(report.sql, /cod_advance_status/);
-    assert.match(report.sql, /cod_advance_verified_at/);
+    // Date-filtered revenue (incl. ₹99 advances) is attributed to the order date.
+    assert.doesNotMatch(report.sql, /cod_advance_verified_at/);
+    assert.match(report.sql, /created_at AS accounting_at/);
     assert.equal(placeholders(report.sql), report.params.length);
   });
 

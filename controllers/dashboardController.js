@@ -220,18 +220,32 @@ export function deviceConfirmationPredicate(columns, alias = "") {
   )`;
 }
 
+/**
+ * Offline Sold orders with a Purchased On date ('YYYY-MM-DD', IST) are dated by
+ * that day for both their sale and payment. NULL for every other order.
+ */
+function purchasedOnExpression(columns, alias = "") {
+  if (!columns.has("purchased_on")) return null;
+  const column = `${alias ? `${alias}.` : ""}purchased_on`;
+  return `CASE WHEN ${column} REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+    THEN ${istDateParameterStartExpression(column)} END`;
+}
+
 function paidDateExpression(columns, alias = "") {
   const prefix = alias ? `${alias}.` : "";
-  if (columns.has("payment_date") && columns.has("created_at")) {
-    return `COALESCE(${prefix}payment_date, ${prefix}created_at)`;
-  }
-  if (columns.has("payment_date")) return `${prefix}payment_date`;
-  if (columns.has("created_at")) return `${prefix}created_at`;
-  return "NULL";
+  const dates = [];
+  const purchasedOn = purchasedOnExpression(columns, alias);
+  if (purchasedOn) dates.push(purchasedOn);
+  if (columns.has("payment_date")) dates.push(`${prefix}payment_date`);
+  if (columns.has("created_at")) dates.push(`${prefix}created_at`);
+  if (!dates.length) return "NULL";
+  return dates.length === 1 ? dates[0] : `COALESCE(${dates.join(", ")})`;
 }
 
 function createdDateExpression(columns, alias = "") {
-  return columns.has("created_at") ? `${alias ? `${alias}.` : ""}created_at` : "NULL";
+  const createdAt = columns.has("created_at") ? `${alias ? `${alias}.` : ""}created_at` : "NULL";
+  const purchasedOn = purchasedOnExpression(columns, alias);
+  return purchasedOn ? `COALESCE(${purchasedOn}, ${createdAt})` : createdAt;
 }
 
 /**
@@ -377,12 +391,13 @@ async function fetchDashboardStats({ adminId, from, to }) {
     : "";
   const codAdvanceCte = columns.has("cod_advance_fee") && columns.has("cod_advance_status")
     ? `SELECT COALESCE(cod_advance_fee, 0) AS advance_amount,
-         ${columns.has("cod_advance_verified_at") ? `COALESCE(cod_advance_verified_at, ${createdDateExpr})` : createdDateExpr} AS advance_paid_at
+         ${columns.has("cod_advance_verified_at") ? `COALESCE(cod_advance_verified_at, ${createdDateExpr})` : createdDateExpr} AS advance_paid_at,
+         ${createdDateExpr} AS advance_ordered_at
        FROM orders
        WHERE LOWER(TRIM(COALESCE(cod_advance_status, ''))) = 'paid'
          AND COALESCE(cod_advance_fee, 0) > 0
          ${paidTestFilter}`
-    : "SELECT 0 AS advance_amount, NULL AS advance_paid_at FROM DUAL WHERE FALSE";
+    : "SELECT 0 AS advance_amount, NULL AS advance_paid_at, NULL AS advance_ordered_at FROM DUAL WHERE FALSE";
 
   const { rows } = await query(
     `WITH order_rows AS (
@@ -456,7 +471,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
        GROUP BY id
      ),
      paid_orders AS (
-       SELECT *, ${paidDateExpr} AS paid_at
+       SELECT *, ${paidDateExpr} AS paid_at, ${createdDateExpr} AS ordered_at
        FROM orders
        WHERE ${paymentStatusExpr} = 'Paid'
          AND LOWER(${orderStatusExpr}) <> 'cancelled'
@@ -563,14 +578,17 @@ async function fetchDashboardStats({ adminId, from, to }) {
          CAST(COALESCE((
            SELECT SUM(${revenueExpr})
            FROM paid_orders
-           WHERE (? IS NULL OR paid_at >= ${istDateParameterStartExpression("?")})
-             AND (? IS NULL OR paid_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
+           /* Date-filtered revenue is attributed to the order date (e.g. COD
+            * ordered 1 Nov, cash collected later, counts on 1 Nov). The
+            * Sales overview tiles above stay on the payment date. */
+           WHERE (? IS NULL OR ordered_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR ordered_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0)
          + COALESCE((
            SELECT SUM(advance_amount)
            FROM cod_advances
-           WHERE (? IS NULL OR advance_paid_at >= ${istDateParameterStartExpression("?")})
-             AND (? IS NULL OR advance_paid_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
+           WHERE (? IS NULL OR advance_ordered_at >= ${istDateParameterStartExpression("?")})
+             AND (? IS NULL OR advance_ordered_at < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))
          ), 0) AS DECIMAL(12,2)) AS analysis_revenue_received,
          CAST(COALESCE((
            SELECT SUM(${revenueExpr})
