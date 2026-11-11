@@ -10,6 +10,7 @@ import { normalizeIndianPhone } from "../utils/phoneUtils.js";
 import { isCodOrder } from "./paymentMode.js";
 import { resolveSoldDevices } from "./soldDeviceQuantity.js";
 import { generateLocalInvoicePdf } from "./localInvoicePdfService.js";
+import { isCodPartialPaidOrder } from "../lib/codPartialPayment.js";
 import {
   createSwipeInvoiceForOrder,
   getSwipeInvoiceDetails,
@@ -60,7 +61,7 @@ const ORDER_SELECT = `
   FROM orders WHERE id = ? LIMIT 1
 `;
 
-// ₹99 COD advance delivery fee columns (sql/add_cod_advance_fee.sql).
+// COD advance columns (sql/add_cod_advance_fee.sql): ₹199 partial payment (older orders: ₹99 fee).
 const COD_ADVANCE_SELECT = ", cod_advance_fee, cod_advance_status, cod_advance_razorpay_payment_id, cod_amount_due";
 
 export async function loadOrderForFulfillment(orderId) {
@@ -225,8 +226,31 @@ export function buildSwipePayload(order) {
   };
 
   if (isCodOrder(order)) {
+    const isPaid = String(order.payment_status || "").trim() === "Paid";
+    if (isCodPartialPaidOrder(order)) {
+      // ₹199 partial payment received online; Swipe shows the invoice as
+      // partially paid with the balance due collected in cash on delivery.
+      const partial = round2(Number(order.cod_advance_fee));
+      const balance = round2(money.finalTotal - partial);
+      const rzRef = String(order.cod_advance_razorpay_payment_id || "");
+      payload.reference = `Website Order: ${order.order_number || order.id}; Payment: COD (Partially Paid Rs ${partial}, Balance Due Rs ${balance})`;
+      payload.notes = [
+        couponNote,
+        `COD Partially Paid: Rs ${partial} paid online${rzRef ? ` (Razorpay ${rzRef})` : ""}. ` +
+          (isPaid ? `Balance Rs ${balance} collected in cash.` : `Remaining due Rs ${balance} payable on delivery.`),
+      ].filter(Boolean).join("; ");
+      payload.payments = [{
+        amount: partial,
+        method: "upi",
+        notes: `COD partial payment${rzRef ? ` ${rzRef}` : ""}`,
+      }];
+      if (isPaid && balance > 0) {
+        payload.payments.push({ amount: balance, method: "cash", notes: "COD balance" });
+      }
+      return payload;
+    }
     payload.reference = `Website Order: ${order.order_number || order.id}; Payment: COD`;
-    if (String(order.payment_status || "").trim() === "Paid") {
+    if (isPaid) {
       payload.payments = [{
         amount: money.finalTotal,
         method: "cash",

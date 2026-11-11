@@ -6,6 +6,7 @@
 import { query } from "../config/db.js";
 import { countDeletedOrders } from "../services/deletedOrdersService.js";
 import { onlineLeadPredicate } from "../services/leads.js";
+import { codPartialRevenueAdjustmentSql } from "../lib/codPartialPayment.js";
 
 function emptyAnalysis(from = null, to = null) {
   return {
@@ -316,7 +317,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const analysisParams = [
     from, from, to, to, // devices sold
     from, from, to, to, // paid orders revenue
-    from, from, to, to, // paid ₹99 COD advances
+    from, from, to, to, // paid COD advances (₹199 partial / older ₹99 fee)
     from, from, to, to, // pending COD revenue
   ];
   const unseenJoin = includeViews
@@ -334,7 +335,8 @@ async function fetchDashboardStats({ adminId, from, to }) {
     : "";
   // Unpaid online orders live on the Leads page, so they do not count as unseen orders.
   const unseenPredicate = includeViews ? `is_seen = 0 AND NOT ${onlineLeadPredicate("o")}` : "FALSE";
-  const revenueExpr = revenueExpression(columns);
+  // Excludes a ₹199 COD partial payment (counted once, in cod_advances).
+  const revenueExpr = `(${revenueExpression(columns)} - ${codPartialRevenueAdjustmentSql(columns)})`;
   const paidDateExpr = paidDateExpression(columns);
   const createdDateExpr = createdDateExpression(columns);
   // Today / this month use the same IST date-boundary expression as the
@@ -473,9 +475,10 @@ async function fetchDashboardStats({ adminId, from, to }) {
          AND LOWER(${orderStatusExpr}) <> 'cancelled'
          ${paidTestFilter}
      ),
-     /* Paid ₹99 COD advance delivery charges: collected online and non-refundable,
-      * so they are revenue received on the verification date. Stored separately
-      * from the product amount, so no double counting when COD is later paid. */
+     /* Paid COD advances (₹199 partial payment; older orders a ₹99 fee),
+      * collected online: revenue received on the verification date. The ₹199
+      * is subtracted from paid/pending COD amounts (revenueExpr), so it is
+      * never double counted when the COD balance is later collected. */
      cod_advances AS (
        ${codAdvanceCte}
      ),

@@ -21,6 +21,7 @@ import {
   updateNdr,
 } from "../services/delhiveryService.js";
 import { isMissingColumnError } from "../lib/dbErrors.js";
+import { codCollectableAmount } from "../lib/codPartialPayment.js";
 import { query } from "../config/db.js";
 import {
   DELHIVERY_SHIPPING_MODE,
@@ -410,7 +411,8 @@ function buildShipmentPayload(order, config, paymentMode) {
   };
 
   if (paymentMode === "COD") {
-    shipment.cod_amount = String(totalAmount);
+    // Collect only the balance when the ₹199 partial payment was paid online.
+    shipment.cod_amount = String(codCollectableAmount(order));
   }
 
   if (config.sellerName) {

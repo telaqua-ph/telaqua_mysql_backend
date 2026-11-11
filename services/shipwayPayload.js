@@ -1,5 +1,6 @@
 import { getShipwayConfig } from "../config/shipwayConfig.js";
 import { isCodOrder } from "./paymentMode.js";
+import { codCollectableAmount, isCodPartialPaidOrder } from "../lib/codPartialPayment.js";
 
 const DEFAULT_PRODUCT_SKU = "telaqua-ph-meter";
 
@@ -49,7 +50,8 @@ export function buildShipwayPayload(order, product, { carrierId } = {}) {
       discount: "0",
     }],
     payment_type: isCodOrder(order) ? "C" : "P",
-    order_total: String(total),
+    // COD with the ₹199 partial payment: the courier collects only the balance.
+    order_total: String(isCodOrder(order) && isCodPartialPaidOrder(order) ? codCollectableAmount(order) : total),
     shipping_firstname: first,
     shipping_lastname: last,
     shipping_address: mandatory.shipping_address,

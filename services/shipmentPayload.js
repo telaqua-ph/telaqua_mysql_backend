@@ -5,6 +5,7 @@
  */
 
 import { DELHIVERY_SHIPPING_MODE } from "../config/delhiveryConfig.js";
+import { codCollectableAmount } from "../lib/codPartialPayment.js";
 
 const clean = (value) =>
   String(value ?? "")
@@ -65,7 +66,8 @@ export function buildShipmentPayload(order, shipment, warehouse, product) {
   }
 
   if (order.email) item.email = String(order.email);
-  if (paymentMode === "COD") item.cod_amount = String(item.total_amount);
+  // COD: collect only the balance (₹199 partial payment already paid online).
+  if (paymentMode === "COD") item.cod_amount = String(codCollectableAmount(order));
 
   return {
     pickup_location: {

@@ -46,6 +46,7 @@ import crypto from "node:crypto";
 import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSafety.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
 import { onlineLeadPredicate } from "../services/leads.js";
+import { isCodAdvanceFeeRequired } from "../services/codAdvanceService.js";
 
 const ALLOWED_ORDER_STATUSES = [
   "New",
@@ -1568,7 +1569,9 @@ export async function createManualCodOrder(req, res) {
 }
 
 /**
- * POST /api/orders/website-cod — storefront COD, no advance payment.
+ * POST /api/orders/website-cod — storefront COD without the ₹199 partial payment.
+ * Only available when COD_ADVANCE_FEE_ENABLED=false; otherwise website COD
+ * must go through /website-cod/advance (₹199 paid online, rest on delivery).
  * The order is created as Confirmed with payment Pending until delivery.
  */
 export async function createWebsiteCodOrder(req, res) {
@@ -1578,6 +1581,13 @@ export async function createWebsiteCodOrder(req, res) {
       return res.status(400).json({
         success: false,
         message: "Invalid JSON body",
+      });
+    }
+    if (isCodAdvanceFeeRequired()) {
+      return res.status(409).json({
+        success: false,
+        code: "COD_PARTIAL_PAYMENT_REQUIRED",
+        message: "Cash on Delivery now needs a ₹199 partial payment online. Please refresh the page and place your order again.",
       });
     }
 

@@ -1,8 +1,9 @@
 /**
  * controllers/codAdvanceController.js
  *
- * Website COD with a ₹99 non-refundable advance delivery fee paid via Razorpay.
- * The COD order is created only after the ₹99 payment is verified server-side.
+ * Website COD with a ₹199 partial payment paid via Razorpay at checkout. The ₹199
+ * is deducted from the order total (after any coupon); the balance is paid in
+ * cash on delivery. The COD order is created only after the ₹199 is verified.
  */
 
 import { query } from "../config/db.js";
@@ -13,7 +14,6 @@ import { ensureWhatsappConsentColumns } from "../services/whatsappConsent.js";
 import { isMissingTableError } from "../lib/dbErrors.js";
 import {
   COD_ADVANCE_DESCRIPTION,
-  COD_ADVANCE_FEE_PAISE,
   codAdvanceBreakdown,
   createCodAdvanceCheckout,
   finalizeCodAdvancePayment,
@@ -35,12 +35,25 @@ function isMissingSchema(error) {
 }
 
 function orderSummary(order) {
-  const breakdown = codAdvanceBreakdown(order.cod_amount_due ?? order.final_total ?? order.total_amount);
+  const total = Number(order.final_total ?? order.total_amount);
+  const paid = Number(order.cod_advance_fee || 0);
+  const due = order.cod_amount_due == null ? total - paid : Number(order.cod_amount_due);
+  const breakdown = {
+    product_amount: total,
+    advance_fee: paid,
+    partial_payment: paid,
+    pay_now: paid,
+    pay_on_delivery: due,
+    total_order_value: total,
+  };
   return {
     db_order_id: order.id,
     order_number: order.order_number,
     payment_mode: "cod",
     payment_status: order.payment_status,
+    payment_status_label: "COD Partially Paid",
+    total_amount: total,
+    cod_amount_due: due,
     order_status: order.order_status,
     advance_payment_status: order.cod_advance_status,
     razorpay_payment_id: order.cod_advance_razorpay_payment_id,
@@ -56,13 +69,6 @@ export async function createCodAdvanceOrder(req, res) {
     if (validation.error) {
       return res.status(400).json({ success: false, message: validation.error });
     }
-    if (body.cod_fee_declaration_accepted !== true) {
-      return res.status(400).json({
-        success: false,
-        message: "Please accept that the ₹99 advance delivery charge is non-refundable.",
-      });
-    }
-
     const orderData = validation.data;
     const pricing = await resolveOrderPricing(orderData);
     if (pricing.error) {
@@ -100,7 +106,7 @@ export async function createCodAdvanceOrder(req, res) {
   } catch (error) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
     console.error("COD advance create-order error:", error);
-    return res.status(500).json({ success: false, message: "We could not start the ₹99 payment. Please try again." });
+    return res.status(500).json({ success: false, message: "We could not start the ₹199 partial payment. Please try again." });
   }
 }
 
@@ -123,7 +129,7 @@ export async function verifyCodAdvancePayment(req, res) {
     if (result.status === "created" || result.status === "already_created") {
       return res.status(result.status === "created" ? 201 : 200).json({
         success: true,
-        message: "COD order confirmed. ₹99 delivery charge received.",
+        message: "COD order confirmed. ₹199 partial payment received.",
         ...orderSummary(result.order),
       });
     }
@@ -134,7 +140,7 @@ export async function verifyCodAdvancePayment(req, res) {
       return res.status(409).json({
         success: false,
         code: "COD_ADVANCE_ORDER_FAILED",
-        message: "Your ₹99 payment was received, but we could not confirm the order " +
+        message: "Your ₹199 partial payment was received, but we could not confirm the order " +
           `(${result.reason}). Our team will contact you to complete or refund it. Please do not pay again.`,
       });
     }
@@ -147,7 +153,7 @@ export async function verifyCodAdvancePayment(req, res) {
     console.error("COD advance verify error:", error);
     return res.status(500).json({
       success: false,
-      message: "We could not confirm your payment right now. If ₹99 was debited, do not pay again — it will be confirmed automatically.",
+      message: "We could not confirm your payment right now. If ₹199 was debited, do not pay again — it will be confirmed automatically.",
     });
   }
 }
@@ -236,7 +242,7 @@ export async function retryCodAdvanceOrder(req, res) {
 
 /**
  * POST /api/orders/cod-advance/:id/refund (admin)
- * Refunds the ₹99 in Razorpay for an advance that never became an order, then records it.
+ * Refunds the partial payment in Razorpay for an advance that never became an order, then records it.
  */
 export async function refundCodAdvance(req, res) {
   try {
@@ -245,7 +251,7 @@ export async function refundCodAdvance(req, res) {
       return res.status(400).json({ success: false, message: "Invalid id" });
     }
     const { rows } = await query(
-      `SELECT razorpay_payment_id, status, order_id FROM cod_advance_payments WHERE id = ?`,
+      `SELECT razorpay_payment_id, status, order_id, amount_paise FROM cod_advance_payments WHERE id = ?`,
       [attemptId]
     );
     const attempt = rows[0];
@@ -253,7 +259,8 @@ export async function refundCodAdvance(req, res) {
       return res.status(409).json({ success: false, message: "Only paid advances without an order can be refunded here." });
     }
     const refund = await getRazorpayClient().payments.refund(attempt.razorpay_payment_id, {
-      amount: COD_ADVANCE_FEE_PAISE,
+      // Refund exactly what was paid (₹199 now; older attempts were ₹99).
+      amount: Number(attempt.amount_paise),
       notes: { reason: "COD order could not be created" },
     });
     await markCodAdvanceRefunded(attemptId, `Refunded: ${refund?.id || "razorpay"}`);

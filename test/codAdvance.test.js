@@ -147,10 +147,14 @@ function mockRes() {
 
 const sign = (orderId, paymentId) => crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET).update(`${orderId}|${paymentId}`).digest("hex");
 
-test("breakdown: ₹99 now, product amount on delivery, total = product + ₹99", () => {
-  assert.deepEqual(codAdvanceBreakdown(1799), {
-    product_amount: 1799, advance_fee: 99, pay_now: 99, pay_on_delivery: 1799, total_order_value: 1898,
+test("breakdown: ₹199 now, deducted from the (post-coupon) total, rest on delivery", () => {
+  assert.deepEqual(codAdvanceBreakdown(4497), {
+    product_amount: 4497, advance_fee: 199, partial_payment: 199, pay_now: 199,
+    pay_on_delivery: 4298, total_order_value: 4497,
   });
+  // A total below ₹199 is paid fully online; nothing is left to collect.
+  assert.equal(codAdvanceBreakdown(150).pay_now, 150);
+  assert.equal(codAdvanceBreakdown(150).pay_on_delivery, 0);
 });
 
 test("advance fee is required unless explicitly disabled", () => {
@@ -162,20 +166,22 @@ test("advance fee is required unless explicitly disabled", () => {
 });
 
 test("payment check rejects wrong amount, wrong order, failed and uncaptured payments", () => {
-  const ok = { amount: 9900, currency: "INR", order_id: "order_x", status: "captured" };
-  assert.equal(checkCodAdvancePayment({ rzOrder: { amount: 9900 }, rzPayment: ok, razorpayOrderId: "order_x" }).ok, true);
-  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 100 }, rzPayment: ok, razorpayOrderId: "order_x" }).reason, /order amount/);
-  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 9900 }, rzPayment: { ...ok, amount: 100 }, razorpayOrderId: "order_x" }).reason, /Payment amount/);
-  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 9900 }, rzPayment: ok, razorpayOrderId: "order_y" }).reason, /does not belong/);
-  assert.equal(checkCodAdvancePayment({ rzOrder: { amount: 9900 }, rzPayment: { ...ok, status: "failed" }, razorpayOrderId: "order_x" }).failed, true);
-  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 9900 }, rzPayment: { ...ok, status: "authorized" }, razorpayOrderId: "order_x" }).reason, /captured/);
+  const ok = { amount: 19900, currency: "INR", order_id: "order_x", status: "captured" };
+  assert.equal(checkCodAdvancePayment({ rzOrder: { amount: 19900 }, rzPayment: ok, razorpayOrderId: "order_x" }).ok, true);
+  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 100 }, rzPayment: ok, razorpayOrderId: "order_x" }).reason, /order amount is not ₹199/);
+  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 19900 }, rzPayment: { ...ok, amount: 100 }, razorpayOrderId: "order_x" }).reason, /Payment amount/);
+  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 19900 }, rzPayment: ok, razorpayOrderId: "order_y" }).reason, /does not belong/);
+  assert.equal(checkCodAdvancePayment({ rzOrder: { amount: 19900 }, rzPayment: { ...ok, status: "failed" }, razorpayOrderId: "order_x" }).failed, true);
+  assert.match(checkCodAdvancePayment({ rzOrder: { amount: 19900 }, rzPayment: { ...ok, status: "authorized" }, razorpayOrderId: "order_x" }).reason, /captured/);
 });
 
-test("checkout creates a ₹99 Razorpay order and no order row", async () => {
+test("checkout creates a ₹199 Razorpay order and no order row", async () => {
   const db = fakeDb();
   await withHarness(db, fakeRazorpay(), async () => {
     const { razorpayOrder } = await startCheckout();
-    assert.equal(razorpayOrder.amount, 9900);
+    assert.equal(COD_ADVANCE_FEE_PAISE, 19900);
+    assert.equal(razorpayOrder.amount, 19900);
+    assert.equal(db.attempts[0].amount_paise, 19900);
     assert.equal(db.attempts[0].razorpay_order_id, razorpayOrder.id);
     assert.equal(db.orders.length, 0);
   });
@@ -193,9 +199,10 @@ test("verified payment creates exactly one COD order; repeat callbacks return th
     assert.equal(webhook.status, "already_created");
     assert.equal(db.orders.length, 1);
     const order = db.orders[0];
-    assert.equal(order.payment_status, "Pending", "the ₹99 advance must not mark the order fully paid");
-    assert.equal(Number(order.cod_amount_due), PRODUCT_PRICE, "COD due excludes the ₹99 already paid");
-    assert.equal(Number(order.cod_advance_fee), 99);
+    assert.equal(order.payment_status, "Pending", "the ₹199 partial payment must not mark the order fully paid");
+    assert.equal(Number(order.final_total), PRODUCT_PRICE, "order total is unchanged (₹199 is not added on top)");
+    assert.equal(Number(order.cod_amount_due), PRODUCT_PRICE - 199, "COD due is the total minus the ₹199 already paid");
+    assert.equal(Number(order.cod_advance_fee), 199);
     assert.equal(order.cod_advance_razorpay_payment_id, "pay_adv_1");
     assert.equal(db.attempts[0].status, "order_created");
   });
@@ -269,15 +276,30 @@ test("verify endpoint with a valid signature returns the order and payment break
     assert.equal(res.statusCode, 201);
     assert.equal(res.body.success, true);
     assert.equal(res.body.order_number, "TAQ-000500");
-    assert.equal(res.body.pay_now, 99);
-    assert.equal(res.body.pay_on_delivery, PRODUCT_PRICE);
-    assert.equal(res.body.total_order_value, PRODUCT_PRICE + 99);
+    assert.equal(res.body.pay_now, 199);
+    assert.equal(res.body.pay_on_delivery, PRODUCT_PRICE - 199);
+    assert.equal(res.body.cod_amount_due, PRODUCT_PRICE - 199);
+    assert.equal(res.body.total_order_value, PRODUCT_PRICE);
+    assert.equal(res.body.payment_status_label, "COD Partially Paid");
   });
 });
 
-test("website COD endpoint is open without the advance and validates the body", async () => {
+test("website COD without the ₹199 partial payment is refused while it is required", async () => {
+  delete process.env.COD_ADVANCE_FEE_ENABLED;
   const res = mockRes();
   await createWebsiteCodOrder({ body: { customer_name: "x" } }, res);
-  assert.equal(res.statusCode, 400);
-  assert.equal(res.body.success, false);
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.code, "COD_PARTIAL_PAYMENT_REQUIRED");
+});
+
+test("website COD endpoint validates the body when the partial payment is switched off", async () => {
+  process.env.COD_ADVANCE_FEE_ENABLED = "false";
+  try {
+    const res = mockRes();
+    await createWebsiteCodOrder({ body: { customer_name: "x" } }, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.success, false);
+  } finally {
+    delete process.env.COD_ADVANCE_FEE_ENABLED;
+  }
 });

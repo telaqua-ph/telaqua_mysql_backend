@@ -2,6 +2,7 @@ import PDFDocument from "pdfkit";
 import { isCodOrder } from "./paymentMode.js";
 import { resolveSoldDevices } from "./soldDeviceQuantity.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
+import { isCodPartialPaidOrder } from "../lib/codPartialPayment.js";
 
 function money(value) {
   const amount = Number(value || 0);
@@ -59,17 +60,26 @@ export async function generateLocalInvoicePdf(order) {
   const gstRate = Number(order.gst_rate ?? 18);
   const isPaid = String(order.payment_status || "").trim() === "Paid";
   const cod = isCodOrder(order);
-  // ₹99 non-refundable delivery charge, paid online in advance on COD orders.
-  const deliveryCharge = cod && order.cod_advance_status === "paid"
+  // ₹199 partial payment paid online and deducted from the total (current COD flow).
+  const partialPaid = cod && isCodPartialPaidOrder(order) ? Number(order.cod_advance_fee || 0) : 0;
+  const balanceDue = partialPaid > 0 ? Math.max(0, finalTotal - partialPaid) : 0;
+  // Older COD orders: ₹99 non-refundable delivery charge paid on top of the total.
+  const deliveryCharge = cod && !partialPaid && order.cod_advance_status === "paid"
     ? Number(order.cod_advance_fee || 0)
     : 0;
   const paymentLabel = cod
-    ? "COD"
+    ? (partialPaid > 0 && !isPaid ? "COD (Partially Paid)" : "COD")
     : String(order.payment_method || "Razorpay");
-  const statusLabel = isPaid ? "PAID" : "PENDING";
+  const statusLabel = isPaid ? "PAID" : partialPaid > 0 ? "PARTIALLY PAID" : "PENDING";
   const statusColor = isPaid ? "#008060" : "#B45309";
-  const totalLabel = isPaid ? "TOTAL PAID" : "TOTAL DUE";
-  const footerReference = cod
+  const totalLabel = isPaid ? "TOTAL PAID" : partialPaid > 0 ? "REMAINING DUE" : "TOTAL DUE";
+  const footerReference = partialPaid > 0
+    ? `Cash on delivery - partially paid. ${money(partialPaid)} paid online` +
+      (order.cod_advance_razorpay_payment_id ? ` (Razorpay reference ${order.cod_advance_razorpay_payment_id})` : "") +
+      (isPaid
+        ? `; balance of ${money(balanceDue)} collected in cash.`
+        : `; remaining ${money(balanceDue)} payable in cash on delivery.`)
+    : cod
     ? (isPaid
       ? "COD payment collected."
       : "Cash on delivery. Payment is pending until collected.") +
@@ -80,7 +90,9 @@ export async function generateLocalInvoicePdf(order) {
     : `Razorpay payment reference: ${order.razorpay_payment_id || "-"}`;
   const footerNote = isPaid
     ? "This fallback copy was generated from the paid order snapshot."
-    : "This fallback copy was generated from the order snapshot. Payment is pending.";
+    : partialPaid > 0
+      ? "This fallback copy was generated from the order snapshot. Balance payment is pending."
+      : "This fallback copy was generated from the order snapshot. Payment is pending.";
 
   doc.rect(0, 0, 595.28, 112).fill("#063970");
   // Shrink long business names so they stay on one line above the tagline.
@@ -149,7 +161,20 @@ export async function generateLocalInvoicePdf(order) {
   // The delivery charge is already paid, so TOTAL DUE stays the product amount
   // and a paid COD order shows the full order value (product + delivery charge).
   let boxTotal = finalTotal;
-  if (deliveryCharge > 0) {
+  if (partialPaid > 0) {
+    summaryY += 20;
+    cell(doc, "Order total", 365, summaryY, 100, { bold: true });
+    cell(doc, money(finalTotal), 465, summaryY, 77, { align: "right", bold: true });
+    summaryY += 20;
+    cell(doc, "Partially paid (online)", 365, summaryY, 110, { color: "#008060" });
+    cell(doc, `- ${money(partialPaid)}`, 465, summaryY, 77, { align: "right", color: "#008060" });
+    if (isPaid) {
+      summaryY += 20;
+      cell(doc, "Balance paid (cash)", 365, summaryY, 110, { color: "#008060" });
+      cell(doc, `- ${money(balanceDue)}`, 465, summaryY, 77, { align: "right", color: "#008060" });
+    }
+    boxTotal = isPaid ? finalTotal : balanceDue;
+  } else if (deliveryCharge > 0) {
     summaryY += 20;
     cell(doc, "Delivery charges", 365, summaryY, 100);
     cell(doc, money(deliveryCharge), 465, summaryY, 77, { align: "right" });

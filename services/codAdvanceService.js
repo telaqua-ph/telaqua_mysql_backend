@@ -1,9 +1,11 @@
 /**
- * ₹99 non-refundable advance delivery fee for website COD orders.
+ * ₹199 partial payment for website COD orders.
  *
- * Flow: create a cod_advance_payments attempt + a ₹99 Razorpay order →
+ * Flow: create a cod_advance_payments attempt + a ₹199 Razorpay order →
  * customer pays → verify (browser callback or webhook) → only then create the
- * COD order. The product amount stays payable in cash on delivery.
+ * COD order. The ₹199 is deducted from the order total (after any coupon);
+ * the balance (cod_amount_due) is collected in cash on delivery.
+ * (Orders placed before this used a ₹99 fee charged on top of the total.)
  *
  * Idempotency: the attempt row is locked FOR UPDATE while the order is created,
  * and order_id / razorpay_payment_id are UNIQUE, so repeated callbacks, refreshes
@@ -22,11 +24,16 @@ import { logPaymentEvent, triggerOrderFulfillmentAsync } from "./confirmRazorpay
 import { triggerOrderPlacedWhatsAppAsync } from "./interaktOrderPlacedService.js";
 import { triggerCalibrationVideoWhatsAppAsync } from "./interaktCalibrationVideoService.js";
 import { scheduleMetaPurchase } from "./metaPurchase.js";
+import {
+  COD_PARTIAL_PAYMENT_RUPEES,
+  codPartialAmount,
+  codPartialBreakdown,
+} from "../lib/codPartialPayment.js";
 
-export const COD_ADVANCE_FEE_RUPEES = 99;
-export const COD_ADVANCE_FEE_PAISE = 9900;
-export const COD_ADVANCE_PURPOSE = "cod_advance_fee";
-export const COD_ADVANCE_DESCRIPTION = "Tel-Aqua COD Advance Delivery Charge";
+export const COD_ADVANCE_FEE_RUPEES = COD_PARTIAL_PAYMENT_RUPEES;
+export const COD_ADVANCE_FEE_PAISE = COD_PARTIAL_PAYMENT_RUPEES * 100;
+export const COD_ADVANCE_PURPOSE = "cod_partial_payment";
+export const COD_ADVANCE_DESCRIPTION = "Tel-Aqua COD Partial Payment";
 
 // pool.query (not the bare query export) so tests can substitute the database.
 const query = (sql, params) => pool.query(sql, params);
@@ -37,7 +44,7 @@ export function setCodAdvanceRazorpayClientForTests(factory) {
   razorpayClientFactory = factory || getRazorpayClient;
 }
 
-/** COD without the advance fee stays available only when explicitly disabled. */
+/** COD without the partial payment stays available only when explicitly disabled. */
 export function isCodAdvanceFeeRequired() {
   return String(process.env.COD_ADVANCE_FEE_ENABLED ?? "true").trim().toLowerCase() !== "false";
 }
@@ -46,16 +53,18 @@ function round2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
-/** Amounts shown to the customer and stored on the order. */
+/** Amounts shown to the customer and stored on the order (₹199 deducted from the total). */
 export function codAdvanceBreakdown(productAmount) {
-  const product = round2(productAmount);
-  return {
-    product_amount: product,
-    advance_fee: COD_ADVANCE_FEE_RUPEES,
-    pay_now: COD_ADVANCE_FEE_RUPEES,
-    pay_on_delivery: product,
-    total_order_value: round2(product + COD_ADVANCE_FEE_RUPEES),
-  };
+  return codPartialBreakdown(productAmount);
+}
+
+/** Razorpay amount for the partial payment, in paise. */
+export function codAdvanceAmountPaise(productAmount) {
+  return Math.round(codPartialAmount(productAmount) * 100);
+}
+
+function rupees(paise) {
+  return `₹${Number(paise) / 100}`;
 }
 
 function parsePayload(value) {
@@ -68,13 +77,13 @@ function parsePayload(value) {
 }
 
 /**
- * Validates a captured ₹99 payment against Razorpay itself (never the browser).
+ * Validates a captured partial payment against Razorpay itself (never the browser).
  * @returns {{ ok: true, payment: object } | { ok: false, reason: string, failed?: boolean }}
  */
 export function checkCodAdvancePayment({ rzOrder, rzPayment, razorpayOrderId, expectedPaise = COD_ADVANCE_FEE_PAISE }) {
   if (!rzOrder || !rzPayment) return { ok: false, reason: "Payment details are unavailable" };
-  if (Number(rzOrder.amount) !== expectedPaise) return { ok: false, reason: "Razorpay order amount is not ₹99" };
-  if (Number(rzPayment.amount) !== expectedPaise) return { ok: false, reason: "Payment amount is not ₹99" };
+  if (Number(rzOrder.amount) !== expectedPaise) return { ok: false, reason: `Razorpay order amount is not ${rupees(expectedPaise)}` };
+  if (Number(rzPayment.amount) !== expectedPaise) return { ok: false, reason: `Payment amount is not ${rupees(expectedPaise)}` };
   if (String(rzPayment.currency || "INR").toUpperCase() !== "INR") return { ok: false, reason: "Payment currency is not INR" };
   if (rzPayment.order_id !== razorpayOrderId) return { ok: false, reason: "Payment does not belong to this Razorpay order" };
   const status = String(rzPayment.status || "").toLowerCase();
@@ -84,16 +93,18 @@ export function checkCodAdvancePayment({ rzOrder, rzPayment, razorpayOrderId, ex
 }
 
 /**
- * Starts a COD checkout: records the attempt and creates a ₹99 Razorpay order.
+ * Starts a COD checkout: records the attempt and creates a ₹199 Razorpay order.
  * No order row exists until the payment is verified.
  */
 export async function createCodAdvanceCheckout({ orderData, productAmount, invoiceAccessHash }) {
+  const amountPaise = codAdvanceAmountPaise(productAmount);
+  if (amountPaise <= 0) throw new Error("Order total must be positive for a COD partial payment");
   const inserted = await query(
     `INSERT INTO cod_advance_payments
        (amount_paise, status, checkout_payload, product_amount, declaration_accepted_at)
      VALUES (?, 'created', ?, ?, NOW())`,
     [
-      COD_ADVANCE_FEE_PAISE,
+      amountPaise,
       JSON.stringify({ orderData, invoice_access_token_hash: invoiceAccessHash }),
       round2(productAmount),
     ]
@@ -101,7 +112,7 @@ export async function createCodAdvanceCheckout({ orderData, productAmount, invoi
   const attemptId = inserted.insertId;
 
   const razorpayOrder = await razorpayClientFactory().orders.create({
-    amount: COD_ADVANCE_FEE_PAISE,
+    amount: amountPaise,
     currency: "INR",
     receipt: `codadv_${attemptId}_${Date.now().toString(36)}`.slice(0, 40),
     notes: {
@@ -109,6 +120,7 @@ export async function createCodAdvanceCheckout({ orderData, productAmount, invoi
       cod_advance_id: String(attemptId),
       description: COD_ADVANCE_DESCRIPTION,
       product_amount: String(round2(productAmount)),
+      cod_balance_due: String(round2(productAmount - amountPaise / 100)),
     },
   });
 
@@ -192,6 +204,8 @@ async function fetchRazorpayState(razorpayOrderId, razorpayPaymentId) {
 }
 
 async function insertCodAdvanceOrder(client, { orderData, pricing, financial, attempt, payment }) {
+  // The partial payment actually captured (₹199), deducted from the total.
+  const paidNow = round2(Number(attempt.amount_paise) / 100);
   const core = [
     orderData.customer_name,
     orderData.phone,
@@ -214,10 +228,10 @@ async function insertCodAdvanceOrder(client, { orderData, pricing, financial, at
     financial.finalTotal,
     orderData.whatsapp_updates_consent ? 1 : 0,
     orderData.whatsapp_consent_at,
-    COD_ADVANCE_FEE_RUPEES,
+    paidNow,
     attempt.razorpay_order_id,
     payment.id,
-    financial.finalTotal,
+    round2(financial.finalTotal - paidNow),
     attempt.declaration_accepted_at,
   ];
   const columns = `customer_name, phone, email, address, city, state, pincode, quantity,
@@ -244,7 +258,7 @@ async function insertCodAdvanceOrder(client, { orderData, pricing, financial, at
 }
 
 /**
- * Verifies the ₹99 payment with Razorpay and creates the COD order exactly once.
+ * Verifies the ₹199 payment with Razorpay and creates the COD order exactly once.
  * Safe to call repeatedly (browser verify, refresh, webhook, admin retry).
  *
  * @returns {Promise<{status: "created"|"already_created"|"not_found"|"payment_invalid"|"order_failed", order?: object, reason?: string}>}
@@ -299,6 +313,8 @@ export async function finalizeCodAdvancePayment({ razorpayOrderId, razorpayPayme
       financial = buildFinancialSnapshot(pricing);
       if (round2(financial.finalTotal) !== round2(current.product_amount)) {
         failure = `Product price changed from ₹${current.product_amount} to ₹${financial.finalTotal}`;
+      } else if (Number(current.amount_paise) > Math.round(financial.finalTotal * 100)) {
+        failure = "Partial payment is larger than the order total";
       }
     }
     if (!failure) {
@@ -409,7 +425,7 @@ export async function markCodAdvanceFailed(razorpayOrderId, reason = "Payment fa
   return result.rowCount ?? result.affectedRows ?? 0;
 }
 
-/** Paid ₹99 advances with no order yet — need a retry or a refund. */
+/** Paid partial payments with no order yet — need a retry or a refund. */
 export async function listCodAdvanceIssues() {
   const { rows } = await query(
     `SELECT id, razorpay_order_id, razorpay_payment_id, amount_paise, status, product_amount,
@@ -424,7 +440,7 @@ export async function listCodAdvanceIssues() {
   return rows;
 }
 
-/** Records that an admin refunded the ₹99 in Razorpay for an advance that never became an order. */
+/** Records that an admin refunded the partial payment for an advance that never became an order. */
 export async function markCodAdvanceRefunded(attemptId, note) {
   const result = await query(
     `UPDATE cod_advance_payments
@@ -449,7 +465,7 @@ export function leadsStartEpochSeconds() {
 
 /**
  * Leads: COD checkouts where the customer filled in the address but never paid
- * the ₹99 (closed the Razorpay window or the payment failed). No order row
+ * the ₹199 (closed the Razorpay window or the payment failed). No order row
  * exists for these. Shown read-only in the admin Leads page for follow-up.
  *
  * - Only checkouts started on/after the leads start date.
@@ -524,7 +540,7 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
 /**
  * Removes a lead from the admin Leads page. Soft delete only: the attempt is
  * marked 'dismissed' and kept for audit. Older unpaid attempts from the same
- * phone are dismissed too, so they do not reappear in its place. A ₹99 payment
+ * phone are dismissed too, so they do not reappear in its place. A ₹199 payment
  * that arrives later for a dismissed attempt still creates the order (finalize
  * does not depend on this status).
  * @returns {Promise<number>} number of attempts dismissed (0 = not found / already gone)

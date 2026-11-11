@@ -5,6 +5,7 @@
  * and payment transition timestamp.  It does not infer payment from fulfilment.
  */
 import { query } from "../config/db.js";
+import { codPartialRevenueAdjustmentSql } from "../lib/codPartialPayment.js";
 
 function dateInput(value) {
   const normalized = String(value || "").trim();
@@ -59,11 +60,12 @@ function confirmedPredicate(columns) {
 }
 
 /**
- * Paid ₹99 COD advance delivery charges. The ₹99 is collected online (Razorpay)
- * when the COD order is placed and is non-refundable, so it is revenue received
- * on the order date, even while the product amount is still pending.
- * It is stored separately (cod_advance_fee) from the product amount
- * (final_total), so the two are never double counted.
+ * Paid COD advances, collected online (Razorpay) when the COD order is placed:
+ * revenue received on the order date, even while the rest is still pending.
+ *  - ₹199 partial payment (current): deducted from final_total, so the paid /
+ *    pending COD rows count final_total − ₹199 (codPartialRevenueAdjustmentSql).
+ *  - ₹99 delivery fee (older orders): charged on top of final_total.
+ * Either way the advance and the COD amount are never double counted.
  */
 export function codAdvanceSelect(columns) {
   if (!columns.has("cod_advance_fee") || !columns.has("cod_advance_status")) {
@@ -108,7 +110,8 @@ export async function getRevenueReport(req, res) {
 
   try {
     const columns = await orderColumns();
-    const amount = amountExpression(columns);
+    // COD amount excluding a ₹199 partial payment (counted in the cod_advance bucket).
+    const amount = `(${amountExpression(columns)} - ${codPartialRevenueAdjustmentSql(columns)})`;
     const createdAt = saleDateExpression(columns);
     const cod = codPredicate(columns);
     const confirmed = confirmedPredicate(columns);
@@ -171,7 +174,7 @@ export async function getRevenueReport(req, res) {
       if (row.bucket === "received" || row.bucket === "advance") {
         report.receivedRevenue += amountValue;
         if (row.bucket === "advance") {
-          // ₹99 COD advance: paid online through Razorpay.
+          // COD advance (₹199 partial payment / older ₹99 fee): paid online through Razorpay.
           report.codAdvanceRevenue += amountValue;
           report.razorpayRevenue += amountValue;
         } else if (row.payment_mode === "COD") report.codRevenue += amountValue;
