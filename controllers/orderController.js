@@ -2031,18 +2031,30 @@ export async function updateShipmentStatus(req, res) {
 
       if (shipment) {
         // shipment_status_at = NOW() so older courier events can't overwrite this manual update.
-        await client.query(
-          `UPDATE shipments SET
-             fulfillment_status = ?,
-             shipment_status = ?,
-             shipment_status_code = NULL,
-             shipment_status_at = NOW(),
-             pickup_status = CASE WHEN ? = 'picked_up' THEN 'Picked Up' ELSE pickup_status END,
-             delivered_at = CASE WHEN ? = 1 THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
-             last_error = NULL
-           WHERE id = ?`,
-          [target.fulfillment, target.label, target.fulfillment, isDelivered, shipment.id]
-        );
+        try {
+          await client.query(
+            `UPDATE shipments SET
+               fulfillment_status = ?,
+               shipment_status = ?,
+               shipment_status_code = NULL,
+               shipment_status_at = NOW(),
+               pickup_status = CASE WHEN ? = 'picked_up' THEN 'Picked Up' ELSE pickup_status END,
+               delivered_at = CASE WHEN ? = 1 THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+               last_error = NULL
+             WHERE id = ?`,
+            [target.fulfillment, target.label, target.fulfillment, isDelivered, shipment.id]
+          );
+        } catch (error) {
+          // Older shipment rows/tables may miss optional columns (shipment_status_at,
+          // pickup_status, delivered_at, last_error). Fall back to the core fields so the
+          // manual status still saves instead of failing the whole request.
+          if (error?.code !== "ER_BAD_FIELD_ERROR") throw error;
+          console.warn("Manual shipment status: falling back to core columns:", error.sqlMessage || error.message);
+          await client.query(
+            `UPDATE shipments SET fulfillment_status = ?, shipment_status = ? WHERE id = ?`,
+            [target.fulfillment, target.label, shipment.id]
+          );
+        }
         try {
           await client.query(
             `INSERT INTO shipment_audit_log (shipment_id, admin_id, action, before_data, after_data)
@@ -2059,7 +2071,10 @@ export async function updateShipmentStatus(req, res) {
             ]
           );
         } catch (error) {
-          if (!isMissingTableError(error)) throw error;
+          // The audit row is best-effort: never block the admin's status change on it.
+          if (!isMissingTableError(error)) {
+            console.warn("Manual shipment status audit log skipped:", error.sqlMessage || error.message);
+          }
         }
       }
 
@@ -2072,8 +2087,15 @@ export async function updateShipmentStatus(req, res) {
     }
 
     const { rows } = await query(`SELECT * FROM orders WHERE id = ?`, [id]);
-    const [withShipment] = await attachLatestShipments(rows);
-    const [withCancellationFlag] = await attachCancellationFlags([withShipment]);
+    // The status is already saved (committed). Decorating the response must not
+    // turn a successful save into an "Internal server error".
+    let withCancellationFlag = rows[0];
+    try {
+      const [withShipment] = await attachLatestShipments(rows);
+      [withCancellationFlag] = await attachCancellationFlags([withShipment]);
+    } catch (error) {
+      console.warn("Manual shipment status: response decoration failed:", error.sqlMessage || error.message);
+    }
     const {
       invoice_access_token_hash: _hash,
       invoice_attempt_token: _attempt,
@@ -2088,7 +2110,13 @@ export async function updateShipmentStatus(req, res) {
     });
   } catch (error) {
     console.error("Update shipment status API error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error" });
+    const detail = error?.sqlMessage || error?.code || "";
+    return res.status(500).json({
+      success: false,
+      message: detail
+        ? `Could not update shipment status: ${detail}`
+        : "Internal server error",
+    });
   }
 }
 
