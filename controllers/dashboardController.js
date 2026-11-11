@@ -301,6 +301,13 @@ function istDateParameterStartExpression(parameter = "?") {
     DATE_SUB(CAST(${parameter} AS DATE), INTERVAL 330 MINUTE))`;
 }
 
+/** Current IST calendar date and first day of the IST month, as 'YYYY-MM-DD'. */
+export function istCalendarDates(now = new Date()) {
+  const ist = new Date(now.getTime() + 330 * 60 * 1000).toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ist)) throw new Error("Invalid IST date");
+  return { todayIst: ist, monthStartIst: `${ist.slice(0, 8)}01` };
+}
+
 async function fetchDashboardStats({ adminId, from, to }) {
   const columns = await readOrdersColumns();
   const includeViews = await hasAdminOrderViewsTable();
@@ -330,23 +337,12 @@ async function fetchDashboardStats({ adminId, from, to }) {
   const revenueExpr = revenueExpression(columns);
   const paidDateExpr = paidDateExpression(columns);
   const createdDateExpr = createdDateExpression(columns);
-  // IST midnight, expressed in the same session time as CURRENT_TIMESTAMP payments.
-  // Numeric offsets also work when MySQL timezone tables are not installed.
-  const todayStartExpr = `TIMESTAMPADD(SECOND,
-    TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()),
-    DATE_SUB(DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)), INTERVAL 330 MINUTE))`;
-  // Calculate the month from the IST calendar date before translating it back
-  // to the session timezone. Deriving DAYOFMONTH from todayStartExpr is wrong
-  // in a UTC session because that instant is still the prior UTC date.
-  const monthStartExpr = `TIMESTAMPADD(SECOND,
-    TIMESTAMPDIFF(SECOND, UTC_TIMESTAMP(), NOW()),
-    DATE_SUB(
-      DATE_SUB(
-        DATE(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)),
-        INTERVAL (DAYOFMONTH(DATE_ADD(UTC_TIMESTAMP(), INTERVAL 330 MINUTE)) - 1) DAY
-      ),
-      INTERVAL 330 MINUTE
-    ))`;
+  // Today / this month use the same IST date-boundary expression as the
+  // "Filter a period" summary, so the Sales overview TODAY tiles always match
+  // a Today filter. The IST calendar date is computed in Node (not in SQL).
+  const { todayIst, monthStartIst } = istCalendarDates();
+  const todayStartExpr = istDateParameterStartExpression(`'${todayIst}'`);
+  const monthStartExpr = istDateParameterStartExpression(`'${monthStartIst}'`);
   const shipmentExpr = shipmentPredicate(columns, "", includeShipmentsTable);
   const codExpr = codOrderPredicate(columns);
   // normalizePaymentMode defaults non-COD orders to Razorpay, so this is the
