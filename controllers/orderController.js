@@ -2061,6 +2061,19 @@ export const MANUAL_SHIPMENT_STATUSES = Object.freeze({
   rto_delivered: { fulfillment: "returned", label: "RTO Delivered" },
 });
 
+/** Errors where the shipment row update can fall back instead of failing the save. */
+function isRecoverableShipmentUpdateError(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.sqlMessage || error?.message || "");
+  return (
+    code === "ER_BAD_FIELD_ERROR" ||
+    code === "ER_CANT_AGGREGATE_2COLLATIONS" ||
+    code === "ER_CANT_AGGREGATE_3COLLATIONS" ||
+    code === "ER_CANT_AGGREGATE_NCOLLATIONS" ||
+    /illegal mix of collations/i.test(message)
+  );
+}
+
 /** PATCH /api/orders/:id/shipment-status — admin manual shipment status override. */
 export async function updateShipmentStatus(req, res) {
   try {
@@ -2083,6 +2096,9 @@ export async function updateShipmentStatus(req, res) {
     }
     const prior = found.rows[0];
     const isDelivered = target.fulfillment === "delivered" ? 1 : 0;
+    // Decided in JS and sent as 1/0: comparing a string parameter with a string
+    // literal inside SQL triggers "Illegal mix of collations" on Hostinger MySQL.
+    const isPickedUp = target.fulfillment === "picked_up" ? 1 : 0;
 
     const client = await pool.connect();
     try {
@@ -2116,22 +2132,28 @@ export async function updateShipmentStatus(req, res) {
                shipment_status = ?,
                shipment_status_code = NULL,
                shipment_status_at = NOW(),
-               pickup_status = CASE WHEN ? = 'picked_up' THEN 'Picked Up' ELSE pickup_status END,
-               delivered_at = CASE WHEN ? = 1 THEN COALESCE(delivered_at, NOW()) ELSE delivered_at END,
+               pickup_status = IF(? = 1, 'Picked Up', pickup_status),
+               delivered_at = IF(? = 1, COALESCE(delivered_at, NOW()), delivered_at),
                last_error = NULL
              WHERE id = ?`,
-            [target.fulfillment, target.label, target.fulfillment, isDelivered, shipment.id]
+            [target.fulfillment, target.label, isPickedUp, isDelivered, shipment.id]
           );
         } catch (error) {
-          // Older shipment rows/tables may miss optional columns (shipment_status_at,
-          // pickup_status, delivered_at, last_error). Fall back to the core fields so the
-          // manual status still saves instead of failing the whole request.
-          if (error?.code !== "ER_BAD_FIELD_ERROR") throw error;
+          // Older shipment rows/tables may miss optional columns, and Hostinger MySQL can
+          // still raise collation errors. Fall back to the core fields so the manual
+          // status always saves instead of failing the whole request.
+          if (!isRecoverableShipmentUpdateError(error)) throw error;
           console.warn("Manual shipment status: falling back to core columns:", error.sqlMessage || error.message);
-          await client.query(
-            `UPDATE shipments SET fulfillment_status = ?, shipment_status = ? WHERE id = ?`,
-            [target.fulfillment, target.label, shipment.id]
-          );
+          try {
+            await client.query(
+              `UPDATE shipments SET fulfillment_status = ?, shipment_status = ? WHERE id = ?`,
+              [target.fulfillment, target.label, shipment.id]
+            );
+          } catch (fallbackError) {
+            if (!isRecoverableShipmentUpdateError(fallbackError)) throw fallbackError;
+            // The order row (what the admin list shows) is still updated below via COMMIT.
+            console.error("Manual shipment status: shipment row not updated:", fallbackError.sqlMessage || fallbackError.message);
+          }
         }
         try {
           await client.query(
