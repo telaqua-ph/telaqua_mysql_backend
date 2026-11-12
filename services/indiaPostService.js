@@ -3,7 +3,7 @@
  *
  * Docs: https://app.indiapost.gov.in/developer-portal/apidoc
  *   POST {base}/v1/access/login                      -> access_token (Bearer, ~15 min)
- *   POST {base}/process-articles-file/{customId}     -> bulk booking (JSON { articles: [...] })
+ *   POST {base}/process-articles/{customId}          -> booking (JSON body { articles: [...] })
  *   GET  {base}/v1/tracking/{trackingNumber}         -> currentStatus + history
  *
  * .env (Hostinger)
@@ -15,7 +15,8 @@
  *   INDIA_POST_CONTRACT_ID                        (from your India Post business contract)
  *   INDIA_POST_DROPOFF_OFFICE_ID / INDIA_POST_DROPOFF_PINCODE   (post office where parcels are handed over)
  *   INDIA_POST_PICKUP_OR_DROPOFF=DROPOFF          (DROPOFF | PICKUP)
- *   INDIA_POST_ARTICLE_TYPE=SP                    (SP = Speed Post, BP = Business Parcel)
+ *   INDIA_POST_ARTICLE_TYPE=SP_INLAND_PARCEL      (SP_INLAND_DOC | SP_INLAND_PARCEL | BUSINESS_PARCEL |
+ *                                                  24_SPEEDPOST_DOC | 24_SPP_PARSPL | 48_SPEEDPOST_DOC)
  *   INDIA_POST_WEIGHT_GRAMS=300  INDIA_POST_LENGTH_CM=20  INDIA_POST_BREADTH_CM=10  INDIA_POST_HEIGHT_CM=6
  *   Sender: INDIA_POST_SENDER_* or the existing TELAQUA_WAREHOUSE_* values.
  */
@@ -23,6 +24,25 @@
 const DEFAULT_SANDBOX_BASE = "https://test.cept.gov.in/beextcustomer";
 const REQUEST_TIMEOUT_MS = 20_000;
 export const INDIA_POST_PROVIDER = "IndiaPost";
+
+/** Article types accepted by India Post for the UAT booking contract. */
+export const INDIA_POST_ARTICLE_TYPES = Object.freeze([
+  "SP_INLAND_DOC",
+  "SP_INLAND_PARCEL",
+  "BUSINESS_PARCEL",
+  "24_SPEEDPOST_DOC",
+  "24_SPP_PARSPL",
+  "48_SPEEDPOST_DOC",
+]);
+const DEFAULT_ARTICLE_TYPE = "SP_INLAND_PARCEL";
+
+/** Old short codes map to the full India Post names; unknown values fall back to Speed Post parcel. */
+export function normalizeArticleType(value) {
+  const code = String(value ?? "").trim().toUpperCase();
+  if (code === "SP") return "SP_INLAND_PARCEL";
+  if (code === "BP") return "BUSINESS_PARCEL";
+  return INDIA_POST_ARTICLE_TYPES.includes(code) ? code : DEFAULT_ARTICLE_TYPE;
+}
 export const INDIA_POST_COURIER_NAME = "India Post Speed Post";
 
 let fetchImpl = (...args) => fetch(...args);
@@ -56,7 +76,7 @@ export function getIndiaPostConfig(env = process.env) {
     contractId: text(env.INDIA_POST_CONTRACT_ID),
     dropoffOfficeId: text(env.INDIA_POST_DROPOFF_OFFICE_ID),
     pickupOrDropoff: text(env.INDIA_POST_PICKUP_OR_DROPOFF).toUpperCase() === "PICKUP" ? "PICKUP" : "DROPOFF",
-    articleType: text(env.INDIA_POST_ARTICLE_TYPE).toUpperCase() === "BP" ? "BP" : "SP",
+    articleType: normalizeArticleType(env.INDIA_POST_ARTICLE_TYPE),
     weightGrams: num(env.INDIA_POST_WEIGHT_GRAMS, 300),
     lengthCm: num(env.INDIA_POST_LENGTH_CM, 20),
     breadthCm: num(env.INDIA_POST_BREADTH_CM, 10),
@@ -248,7 +268,7 @@ export async function bookIndiaPostArticle(order, options = {}) {
   if (invalid.length) throw indiaPostError("INDIA_POST_ORDER_DATA_INVALID", invalid.join(" "));
 
   const { status, ok, data } = await authorizedCall(
-    `/process-articles-file/${encodeURIComponent(config.customerId)}`,
+    `/process-articles/${encodeURIComponent(config.customerId)}`,
     { method: "POST", body: { articles: [article] } },
     config
   );

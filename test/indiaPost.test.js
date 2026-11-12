@@ -53,7 +53,7 @@ function fakeIndiaPost({ booking, tracking, loginStatus = 200 } = {}) {
         ? jsonResponse(200, { success: true, data: { access_token: "TOKEN1", expires_in: 900 } })
         : jsonResponse(401, { success: false, message: "Invalid credentials" });
     }
-    if (url.includes("/process-articles-file/")) return jsonResponse(200, booking);
+    if (url.includes("/process-articles/")) return jsonResponse(200, booking);
     if (url.includes("/v1/tracking/")) return tracking ? jsonResponse(200, tracking) : jsonResponse(404, { success: false });
     throw new Error(`unexpected url ${url}`);
   });
@@ -79,7 +79,7 @@ test("article: built from the order; COD collects only what is still due", () =>
   assert.equal(article.bulk_customer_id, 1372039469);
   assert.equal(article.contract_id, 41441234);
   assert.equal(article.pickup_dropoff_office_id, 21260024);
-  assert.equal(article.article_type, "SP");
+  assert.equal(article.article_type, "SP_INLAND_PARCEL");
   assert.equal(article.physical_weight, 300);
   // Box size goes to India Post in millimetres (20 x 10 x 6 cm).
   assert.equal(article.length, 200);
@@ -112,8 +112,8 @@ test("booking: valid article returns its article number; rejected article return
   const booked = await bookIndiaPostArticle(order, { config });
   assert.equal(booked.barcode, "EB468827991IN");
   assert.equal(booked.tariff, 41);
-  const upload = calls.find((c) => c.url.includes("/process-articles-file/"));
-  assert.equal(upload.url, "https://test.cept.gov.in/beextcustomer/process-articles-file/1372039469");
+  const upload = calls.find((c) => c.url.includes("/process-articles/"));
+  assert.equal(upload.url, "https://test.cept.gov.in/beextcustomer/process-articles/1372039469");
   assert.equal(upload.body.articles.length, 1);
 
   fakeIndiaPost({ booking: { success: true, valid_articles: [], error_articles: [{ index: 0, errors: ["Dropoff pincode must be exactly 6 digits"] }] } });
