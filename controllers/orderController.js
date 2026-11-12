@@ -781,12 +781,13 @@ export function validateWebsiteCodOrder(body) {
 export function validateCheckoutLead(body) {
   if (!body || typeof body !== "object") return { error: "Invalid JSON body" };
 
+  const optionalText = (value) => typeof value === "string" ? value.trim() : "";
   const customer_name = trimStr(body.customer_name);
   const phone = String(trimStr(body.phone) || "").replace(/\D/g, "");
   if (!customer_name) return { error: "customer_name is required" };
   if (!/^\d{10}$/.test(phone)) return { error: "phone must contain exactly 10 digits" };
 
-  const emailRaw = trimStr(body.email);
+  const emailRaw = optionalText(body.email);
   if (emailRaw && !isValidEmail(emailRaw)) return { error: "email must be a valid email address" };
 
   const pincode = String(trimStr(body.pincode) || "").replace(/\D/g, "");
@@ -795,10 +796,14 @@ export function validateCheckoutLead(body) {
     data: {
       customer_name,
       phone,
-      email: resolveOrderEmail(emailRaw, phone),
-      address: trimStr(body.address),
-      city: trimStr(body.city),
-      state: trimStr(body.state),
+      // Leads show only information the visitor has entered; no placeholder email.
+      email: emailRaw,
+      address: optionalText(body.address),
+      house_landmark: optionalText(body.house_landmark),
+      village: optionalText(body.village),
+      mandal_area: optionalText(body.mandal_area),
+      city: optionalText(body.city),
+      state: optionalText(body.state),
       pincode: /^\d{6}$/.test(pincode) ? pincode : "",
       quantity: Number.isFinite(suppliedQuantity) && suppliedQuantity > 0 ? Math.floor(suppliedQuantity) : 1,
       promo_code: body.promo_code ? normalizePromoCode(body.promo_code) : null,
