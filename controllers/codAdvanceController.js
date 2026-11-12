@@ -23,7 +23,7 @@ import {
   markCodAdvanceRefunded,
   saveCheckoutLead,
 } from "../services/codAdvanceService.js";
-import { createInvoiceAccessToken, validateWebsiteCodOrder } from "./orderController.js";
+import { createInvoiceAccessToken, validateCheckoutLead, validateWebsiteCodOrder } from "./orderController.js";
 import { listOnlineLeadOrders } from "../services/leads.js";
 import { isValidRazorpaySignature } from "./paymentController.js";
 
@@ -160,11 +160,11 @@ export async function verifyCodAdvancePayment(req, res) {
 
 /**
  * POST /api/orders/checkout-lead — storefront saves the shipping details once
- * they are complete, so a customer who leaves without ordering appears in Leads.
+ * after name + phone are entered, so a customer who leaves without ordering appears in Leads.
  */
 export async function captureCheckoutLead(req, res) {
   try {
-    const validation = validateWebsiteCodOrder(req.body || {});
+    const validation = validateCheckoutLead(req.body || {});
     if (validation.error) {
       return res.status(400).json({ success: false, message: validation.error });
     }

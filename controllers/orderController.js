@@ -773,6 +773,39 @@ export function validateWebsiteCodOrder(body) {
   };
 }
 
+/**
+ * Lightweight checkout-lead validation. Unlike placing an order, a lead only
+ * requires contact details; address fields may be added later and will update
+ * the existing lead for the same phone number.
+ */
+export function validateCheckoutLead(body) {
+  if (!body || typeof body !== "object") return { error: "Invalid JSON body" };
+
+  const customer_name = trimStr(body.customer_name);
+  const phone = String(trimStr(body.phone) || "").replace(/\D/g, "");
+  if (!customer_name) return { error: "customer_name is required" };
+  if (!/^\d{10}$/.test(phone)) return { error: "phone must contain exactly 10 digits" };
+
+  const emailRaw = trimStr(body.email);
+  if (emailRaw && !isValidEmail(emailRaw)) return { error: "email must be a valid email address" };
+
+  const pincode = String(trimStr(body.pincode) || "").replace(/\D/g, "");
+  const suppliedQuantity = Number(body.quantity);
+  return {
+    data: {
+      customer_name,
+      phone,
+      email: resolveOrderEmail(emailRaw, phone),
+      address: trimStr(body.address),
+      city: trimStr(body.city),
+      state: trimStr(body.state),
+      pincode: /^\d{6}$/.test(pincode) ? pincode : "",
+      quantity: Number.isFinite(suppliedQuantity) && suppliedQuantity > 0 ? Math.floor(suppliedQuantity) : 1,
+      promo_code: body.promo_code ? normalizePromoCode(body.promo_code) : null,
+    },
+  };
+}
+
 function parseOrderId(raw) {
   const id = Number(raw);
   if (!Number.isInteger(id) || id <= 0) {
