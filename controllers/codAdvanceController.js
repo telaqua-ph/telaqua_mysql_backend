@@ -25,6 +25,7 @@ import {
 } from "../services/codAdvanceService.js";
 import { createInvoiceAccessToken, validateCheckoutLead, validateWebsiteCodOrder } from "./orderController.js";
 import { listOnlineLeadOrders } from "../services/leads.js";
+import { listCheckoutLeads, upsertCheckoutLead } from "../services/checkoutLeadService.js";
 import { isValidRazorpaySignature } from "./paymentController.js";
 
 const MIGRATION_MESSAGE = "COD advance tables are missing. Run node scripts/migrate-cod-advance-fee.js";
@@ -169,13 +170,7 @@ export async function captureCheckoutLead(req, res) {
       return res.status(400).json({ success: false, message: validation.error });
     }
     const orderData = validation.data;
-    let pricing = await resolveOrderPricing(orderData);
-    // An invalid promo code must not lose the lead: fall back to the list price.
-    if (pricing.error && orderData.promo_code) {
-      pricing = await resolveOrderPricing({ ...orderData, promo_code: null });
-    }
-    const productAmount = pricing.error ? 0 : buildFinancialSnapshot(pricing).finalTotal;
-    const leadId = await saveCheckoutLead({ orderData, productAmount });
+    const leadId = await upsertCheckoutLead(orderData);
     return res.json({ success: true, lead_id: leadId });
   } catch (error) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
@@ -198,8 +193,8 @@ export async function listCodAdvanceIssuesHandler(req, res) {
 /** GET /api/orders/cod-advance/unpaid (admin) — Leads: unpaid COD checkouts and unpaid online orders. */
 export async function listUnpaidCodCheckoutsHandler(req, res) {
   try {
-    const [checkouts, onlineOrders] = await Promise.all([listUnpaidCodCheckouts(), listOnlineLeadOrders()]);
-    return res.json({ success: true, checkouts, online_orders: onlineOrders });
+    const [checkoutLeads, checkouts, onlineOrders] = await Promise.all([listCheckoutLeads(), listUnpaidCodCheckouts(), listOnlineLeadOrders()]);
+    return res.json({ success: true, checkouts: [...checkoutLeads, ...checkouts], online_orders: onlineOrders });
   } catch (error) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
     console.error("Unpaid COD checkouts error:", error);
