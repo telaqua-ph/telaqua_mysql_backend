@@ -782,10 +782,11 @@ export function validateCheckoutLead(body) {
   if (!body || typeof body !== "object") return { error: "Invalid JSON body" };
 
   const optionalText = (value) => typeof value === "string" ? value.trim() : "";
+  const checkout_session_id = optionalText(body.checkout_session_id);
   const customer_name = trimStr(body.customer_name);
   const phone = String(trimStr(body.phone) || "").replace(/\D/g, "");
-  if (!customer_name) return { error: "customer_name is required" };
-  if (!/^\d{10}$/.test(phone)) return { error: "phone must contain exactly 10 digits" };
+  if (!checkout_session_id || checkout_session_id.length > 100) return { error: "checkout_session_id is required" };
+  if (phone && !/^\d{10}$/.test(phone)) return { error: "phone must contain exactly 10 digits" };
 
   const emailRaw = optionalText(body.email);
   if (emailRaw && !isValidEmail(emailRaw)) return { error: "email must be a valid email address" };
@@ -794,6 +795,7 @@ export function validateCheckoutLead(body) {
   const suppliedQuantity = Number(body.quantity);
   return {
     data: {
+      checkout_session_id,
       customer_name,
       phone,
       // Leads show only information the visitor has entered; no placeholder email.
@@ -807,6 +809,14 @@ export function validateCheckoutLead(body) {
       pincode: /^\d{6}$/.test(pincode) ? pincode : "",
       quantity: Number.isFinite(suppliedQuantity) && suppliedQuantity > 0 ? Math.floor(suppliedQuantity) : 1,
       promo_code: body.promo_code ? normalizePromoCode(body.promo_code) : null,
+      payment_method: optionalText(body.payment_method),
+      product_name: optionalText(body.product_name),
+      product_id: optionalText(body.product_id),
+      original_amount: Number(body.original_amount) || 0,
+      discount_amount: Number(body.discount_amount) || 0,
+      final_amount: Number(body.final_amount) || 0,
+      checkout_url: optionalText(body.checkout_url).slice(0, 500),
+      lead_source: optionalText(body.lead_source).slice(0, 50) || "checkout",
     },
   };
 }

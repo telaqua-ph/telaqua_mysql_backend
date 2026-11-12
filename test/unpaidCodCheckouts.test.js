@@ -28,7 +28,7 @@ test("unpaid COD checkouts: one latest row per phone, JSON nulls cleaned", async
     assert.equal(rows[0].product_amount, 1799);
     assert.equal(rows[1].quantity, 2);
     assert.match(seenSql, /order_id IS NULL/);
-    assert.match(seenSql, /status IN \('created', 'failed'\)/);
+    assert.match(seenSql, /status IN \('created', 'failed', 'started', 'in_progress', 'abandoned'\)/);
     assert.match(seenSql, /NOT EXISTS/);
     // Only a real order (paid, or COD) removes a COD lead; an unpaid online order does not.
     const notExists = seenSql.slice(seenSql.indexOf("NOT EXISTS")).replace(/\s+/g, " ");

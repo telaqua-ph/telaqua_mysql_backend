@@ -32,3 +32,11 @@ ALTER TABLE orders ADD COLUMN cod_advance_razorpay_payment_id VARCHAR(64) NULL;
 ALTER TABLE orders ADD COLUMN cod_advance_verified_at DATETIME NULL;
 ALTER TABLE orders ADD COLUMN cod_amount_due DECIMAL(10,2) NULL;
 ALTER TABLE orders ADD COLUMN cod_fee_declaration_accepted_at DATETIME NULL;
+
+-- Session-based abandoned checkout lead tracking (additive).
+ALTER TABLE cod_advance_payments ADD COLUMN checkout_session_id VARCHAR(100) NULL;
+ALTER TABLE cod_advance_payments ADD COLUMN lead_status VARCHAR(20) NULL;
+ALTER TABLE cod_advance_payments ADD COLUMN last_activity_at DATETIME NULL;
+ALTER TABLE cod_advance_payments ADD COLUMN converted_order_id BIGINT UNSIGNED NULL;
+ALTER TABLE cod_advance_payments ADD UNIQUE KEY uq_checkout_lead_session (checkout_session_id);
+ALTER TABLE cod_advance_payments ADD KEY idx_checkout_lead_status (lead_status, last_activity_at);

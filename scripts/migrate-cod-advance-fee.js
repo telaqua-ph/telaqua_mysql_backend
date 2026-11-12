@@ -32,7 +32,7 @@ async function main() {
         await client.query(statement);
         console.log("OK  ", label);
       } catch (error) {
-        if (error?.code !== "ER_DUP_FIELDNAME") throw error;
+        if (error?.code !== "ER_DUP_FIELDNAME" && error?.code !== "ER_DUP_KEYNAME") throw error;
         console.log("SKIP", label, "(column already exists)");
       }
     }
