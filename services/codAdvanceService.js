@@ -150,24 +150,25 @@ export async function saveCheckoutLead({ orderData, productAmount }) {
   const amount = round2(productAmount);
   const { rows } = await query(
     `SELECT cap.id FROM cod_advance_payments cap
-     WHERE cap.checkout_session_id = ? AND cap.amount_paise = 0 AND cap.order_id IS NULL
-       AND cap.status IN ('started', 'in_progress', 'abandoned')
+     WHERE cap.amount_paise = 0 AND cap.order_id IS NULL
+       AND cap.status = 'created'
+       AND JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.checkout_session_id')) = ?
      ORDER BY cap.id DESC
      LIMIT 1`,
     [orderData.checkout_session_id]
   );
   if (rows[0]) {
     await query(
-      `UPDATE cod_advance_payments SET checkout_payload = ?, product_amount = ?, lead_status = 'in_progress', last_activity_at = NOW() WHERE id = ?`,
+      `UPDATE cod_advance_payments SET checkout_payload = ?, product_amount = ? WHERE id = ?`,
       [payload, amount, rows[0].id]
     );
     return rows[0].id;
   }
   const inserted = await query(
     `INSERT INTO cod_advance_payments
-       (amount_paise, status, checkout_payload, product_amount, declaration_accepted_at, checkout_session_id, lead_status, last_activity_at)
-     VALUES (0, 'started', ?, ?, NOW(), ?, 'started', NOW())`,
-    [payload, amount, orderData.checkout_session_id]
+       (amount_paise, status, checkout_payload, product_amount, declaration_accepted_at)
+     VALUES (0, 'created', ?, ?, NOW())`,
+    [payload, amount]
   );
   return inserted.insertId;
 }
@@ -475,7 +476,7 @@ export function leadsStartEpochSeconds() {
  */
 export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
   const { rows } = await query(
-    `SELECT cap.id, cap.status, cap.lead_status, cap.last_activity_at, cap.amount_paise, cap.product_amount, cap.failure_reason,
+    `SELECT cap.id, cap.status, cap.amount_paise, cap.product_amount, cap.failure_reason,
             cap.razorpay_order_id, cap.created_at, cap.updated_at,
             JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.customer_name')) AS customer_name,
             JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.phone')) AS phone,
@@ -488,7 +489,7 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
             JSON_UNQUOTE(JSON_EXTRACT(cap.checkout_payload, '$.orderData.promo_code')) AS promo_code
      FROM cod_advance_payments cap
      WHERE cap.order_id IS NULL
-       AND cap.status IN ('created', 'failed', 'started', 'in_progress', 'abandoned')
+       AND cap.status IN ('created', 'failed')
        AND UNIX_TIMESTAMP(cap.created_at) >= ?
        AND NOT EXISTS (
          SELECT 1 FROM orders o
@@ -517,7 +518,7 @@ export async function listUnpaidCodCheckouts({ limit = 500 } = {}) {
     seenPhones.add(key);
     latest.push({
       ...row,
-      lead_status: clean(row.lead_status) || (row.amount_paise === 0 ? "Started" : "Pending"),
+      lead_status: row.amount_paise === 0 ? "Started" : "Pending",
       customer_name: clean(row.customer_name),
       phone,
       email: clean(row.email),
