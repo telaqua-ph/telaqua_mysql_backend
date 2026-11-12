@@ -214,9 +214,11 @@ export function buildIndiaPostArticle(order, { barcode = "", weightGrams, config
     physical_weight: num(weightGrams, config.weightGrams),
     shape_of_article: "NROL",
     // India Post expects dimensions in millimetres (API onboarding guide); settings are in cm.
-    length: Math.round(config.lengthCm * 10),
-    breadth_diameter: Math.round(config.breadthCm * 10),
-    height: Math.round(config.heightCm * 10),
+    // India Post validates these in CENTIMETRES (Speed Post parcel: L 14-150,
+    // W 9-150, H 1-150, total up to 300). Sending mm was rejected in UAT.
+    length: Math.round(config.lengthCm),
+    breadth_diameter: Math.round(config.breadthCm),
+    height: Math.round(config.heightCm),
     instruction_rts: "RTS",
     sender_name: config.sender.name,
     sender_company: config.sender.company,

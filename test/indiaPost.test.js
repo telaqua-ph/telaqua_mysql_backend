@@ -82,9 +82,9 @@ test("article: built from the order; COD collects only what is still due", () =>
   assert.equal(article.article_type, "SP_INLAND_PARCEL");
   assert.equal(article.physical_weight, 300);
   // Box size goes to India Post in millimetres (20 x 10 x 6 cm).
-  assert.equal(article.length, 200);
-  assert.equal(article.breadth_diameter, 100);
-  assert.equal(article.height, 60);
+  assert.equal(article.length, 20);
+  assert.equal(article.breadth_diameter, 10);
+  assert.equal(article.height, 6);
   assert.equal(article.codr_cod, "COD");
   assert.equal(article.value_for_codr_cod, 1799);
   assert.equal(article.barcode_no, "EB468827991IN");
