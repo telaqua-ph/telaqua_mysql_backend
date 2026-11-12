@@ -166,10 +166,18 @@ export async function generateLocalInvoicePdf(order) {
     cell(doc, "Order total", 365, summaryY, 100, { bold: true });
     cell(doc, money(finalTotal), 465, summaryY, 77, { align: "right", bold: true });
     summaryY += 20;
-    cell(doc, "Partially paid (online)", 365, summaryY, 110, { color: "#008060" });
-    cell(doc, `- ${money(partialPaid)}`, 465, summaryY, 77, { align: "right", color: "#008060" });
+    // Give the online partial payment the same prominent treatment as the balance due.
+    doc.rect(355, summaryY - 7, 195, 32).fill("#063970");
+    cell(doc, "Partially paid (online)", 365, summaryY + 3, 110, {
+      bold: true, size: 11, color: "#FFFFFF",
+    });
+    cell(doc, `- ${money(partialPaid)}`, 465, summaryY + 3, 77, {
+      align: "right", bold: true, size: 11, color: "#FFFFFF",
+    });
+    // Leave a clear gap below the 32pt highlight before the remaining-due box.
+    summaryY += 32;
     if (isPaid) {
-      summaryY += 20;
+      summaryY += 8;
       cell(doc, "Balance paid (cash)", 365, summaryY, 110, { color: "#008060" });
       cell(doc, `- ${money(balanceDue)}`, 465, summaryY, 77, { align: "right", color: "#008060" });
     }
