@@ -72,7 +72,7 @@ export function codAdvanceSelect(columns) {
     return "SELECT NULL AS id, NULL AS order_number, 0 AS amount, NULL AS accounting_at, 'Razorpay' AS payment_mode, '' AS payment_status, 'advance' AS bucket FROM DUAL WHERE FALSE";
   }
   // Date-filtered revenue is attributed to the order date.
-  const createdAt = columns.has("created_at") ? "created_at" : "NULL";
+  const createdAt = saleDateExpression(columns);
   const testFilter = columns.has("is_test_order") ? "AND COALESCE(is_test_order, 0) = 0" : "";
   const orderNumber = columns.has("order_number") ? "order_number" : "NULL";
   return `SELECT id, ${orderNumber} AS order_number, COALESCE(cod_advance_fee, 0) AS amount,
@@ -98,7 +98,7 @@ export function saleDateExpression(columns) {
 }
 
 function istDayExpression(timestamp) {
-  return `TIMESTAMPADD(MINUTE, TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()) + 330, ${timestamp})`;
+  return `TIMESTAMPADD(MINUTE, 330 - TIMESTAMPDIFF(MINUTE, UTC_TIMESTAMP(), NOW()), ${timestamp})`;
 }
 
 export async function getRevenueReport(req, res) {

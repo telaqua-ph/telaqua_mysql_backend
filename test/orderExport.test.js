@@ -54,3 +54,10 @@ test("total devices sold list includes paid devices and confirmed COD payment-pe
   });
   assert.deepEqual(result.map((order) => order.id), [1, 2, 4, 5]);
 });
+
+
+test("backdated offline exports follow Purchased On instead of the entry date", () => {
+  const offline = [{ ...orders[1], created_at: "2026-11-10 15:00:00", purchased_on: "2026-08-08" }];
+  assert.equal(filterOrdersForExport(offline, { startDate: "2026-08-08", endDate: "2026-08-08" }).length, 1);
+  assert.equal(filterOrdersForExport(offline, { startDate: "2026-11-10", endDate: "2026-11-10" }).length, 0);
+});

@@ -77,6 +77,32 @@ async function runSuite() {
     assert.equal(placeholders(report.sql), report.params.length);
   });
 
+  test("offline revenue uses Purchased On for received, pending and advance dates", async () => {
+    ORDER_COLUMNS.push("purchased_on");
+    try {
+      calls.length = 0;
+      reportRows = [
+        { id: 1478, order_number: "TAQ-001478", amount: "1499.00", payment_mode: "COD", payment_status: "Paid", bucket: "received", accounting_date: "2026-08-08" },
+      ];
+      const res = fakeRes();
+      await getRevenueReport({ query: { from: "2026-08-08", to: "2026-08-08" } }, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.receivedRevenue, 1499);
+      assert.equal(res.body.codRevenue, 1499);
+      assert.deepEqual(res.body.daily, [{ date: "2026-08-08", amount: 1499 }]);
+      const report = calls.find((c) => c.sql.includes("FROM contributing"));
+      assert.equal((report.sql.match(/WHEN purchased_on REGEXP/g) || []).length, 3);
+      assert.match(report.sql, /330 - TIMESTAMPDIFF/);
+      assert.equal(placeholders(report.sql), report.params.length);
+      await getInventoryDevicesSold(1);
+      const dashboard = calls.find((c) => c.sql.includes("cod_advances AS"));
+      assert.match(dashboard.sql, /WHEN purchased_on REGEXP/);
+      assert.equal(placeholders(dashboard.sql), dashboard.params.length);
+    } finally {
+      ORDER_COLUMNS.pop();
+    }
+  });
+
   test("dashboard stats SQL includes ₹99 advances and placeholders match params", async () => {
     calls.length = 0;
     await getInventoryDevicesSold(1);

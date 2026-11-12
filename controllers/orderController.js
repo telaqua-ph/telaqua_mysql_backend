@@ -288,7 +288,9 @@ export function filterOrdersForExport(rows, input = {}) {
   if (!allTime && selectedIds.size === 0 && !hasActiveFilter) return [];
 
   return rows.filter((order) => {
-    const createdDate = exportDate(order.created_at);
+    const createdDate = EXPORT_DATE.test(order.purchased_on || "")
+      ? order.purchased_on
+      : exportDate(order.created_at);
     if ((startDate && createdDate < startDate) || (endDate && createdDate > endDate)) return false;
     if (selectedIds.size && !selectedIds.has(String(order.id))) return false;
     if (!matchesExportMetric(order, metric)) return false;

@@ -389,7 +389,7 @@ async function fetchDashboardStats({ adminId, from, to }) {
     : "";
   const codAdvanceCte = columns.has("cod_advance_fee") && columns.has("cod_advance_status")
     ? `SELECT COALESCE(cod_advance_fee, 0) AS advance_amount,
-         ${columns.has("cod_advance_verified_at") ? `COALESCE(cod_advance_verified_at, ${createdDateExpr})` : createdDateExpr} AS advance_paid_at,
+         ${columns.has("cod_advance_verified_at") ? `COALESCE(${purchasedOnExpression(columns) || "NULL"}, cod_advance_verified_at, ${createdDateExpr})` : createdDateExpr} AS advance_paid_at,
          ${createdDateExpr} AS advance_ordered_at
        FROM orders
        WHERE LOWER(TRIM(COALESCE(cod_advance_status, ''))) = 'paid'
