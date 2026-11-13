@@ -1637,7 +1637,7 @@ export async function createWebsiteCodOrder(req, res) {
       return res.status(409).json({
         success: false,
         code: "COD_PARTIAL_PAYMENT_REQUIRED",
-        message: "Cash on Delivery now needs a ₹199 partial payment online. Please refresh the page and place your order again.",
+        message: "Cash on Delivery needs an online partial payment of ₹199 per item, capped at ₹597 and deducted from your order total. Please refresh the page and place your order again.",
       });
     }
 

@@ -14,6 +14,7 @@ import {
 } from "../services/codAdvanceService.js";
 import { verifyCodAdvancePayment } from "../controllers/codAdvanceController.js";
 import { createWebsiteCodOrder } from "../controllers/orderController.js";
+import { buildSwipePayload } from "../services/invoiceService.js";
 import { PRODUCT_PRICE } from "../services/orderPricing.js";
 
 process.env.RAZORPAY_KEY_ID = "rzp_test_key";
@@ -301,5 +302,58 @@ test("website COD endpoint validates the body when the partial payment is switch
     assert.equal(res.body.success, false);
   } finally {
     delete process.env.COD_ADVANCE_FEE_ENABLED;
+  }
+});
+
+
+for (const [quantity, advance] of [[1, 199], [2, 398], [3, 597], [4, 597], [10, 597]]) {
+  test(`COD quantity ${quantity}: ₹${advance} captured, deducted, and recorded on invoice`, async () => {
+    const db = fakeDb();
+    const total = PRODUCT_PRICE * quantity;
+    const expectedPaise = advance * 100;
+    await withHarness(db, fakeRazorpay({ orderAmount: expectedPaise, payment: { amount: expectedPaise } }), async () => {
+      const { razorpayOrder } = await createCodAdvanceCheckout({
+        orderData: { ...orderData, quantity }, productAmount: total, invoiceAccessHash: "hash",
+      });
+      assert.equal(razorpayOrder.amount, expectedPaise);
+      assert.equal(db.attempts[0].amount_paise, expectedPaise);
+      const split = codAdvanceBreakdown(total, quantity);
+      assert.equal(split.pay_now, advance);
+      assert.equal(split.pay_on_delivery, total - advance);
+      assert.equal(split.total_order_value, total);
+      const result = await finalizeCodAdvancePayment({ razorpayOrderId: razorpayOrder.id, source: "webhook" });
+      assert.equal(result.status, "created");
+      assert.equal(Number(result.order.final_total), total);
+      assert.equal(Number(result.order.cod_advance_fee), advance);
+      assert.equal(Number(result.order.cod_amount_due), total - advance);
+      const invoice = buildSwipePayload({ ...orderData, ...result.order, quantity });
+      assert.equal(invoice.payments[0].amount, advance);
+      assert.match(invoice.notes, new RegExp(`Remaining due Rs ${total - advance}`));
+      const settled = buildSwipePayload({ ...orderData, ...result.order, quantity, payment_status: "Paid" });
+      assert.equal(settled.payments.reduce((sum, p) => sum + p.amount, 0), total);
+      const repeat = await finalizeCodAdvancePayment({ razorpayOrderId: razorpayOrder.id, razorpayPaymentId: "pay_adv_1" });
+      assert.equal(repeat.status, "already_created");
+      assert.equal(db.orders.length, 1);
+    });
+  });
+}
+
+test("multi-unit COD rejects a captured single-unit advance", async () => {
+  const db = fakeDb();
+  await withHarness(db, fakeRazorpay({ orderAmount: 39800 }), async () => {
+    const { razorpayOrder } = await createCodAdvanceCheckout({
+      orderData: { ...orderData, quantity: 2 }, productAmount: PRODUCT_PRICE * 2, invoiceAccessHash: "hash",
+    });
+    const result = await finalizeCodAdvancePayment({ razorpayOrderId: razorpayOrder.id, razorpayPaymentId: "pay_adv_1" });
+    assert.equal(result.status, "payment_invalid");
+    assert.equal(db.orders.length, 0);
+  });
+});
+
+test("quantity-based COD advance never exceeds the discounted product total", () => {
+  for (const quantity of [2, 3, 4, 10]) {
+    assert.equal(codAdvanceBreakdown(150, quantity).pay_now, 150);
+    assert.equal(codAdvanceBreakdown(150, quantity).pay_on_delivery, 0);
+    assert.equal(codAdvanceBreakdown(0, quantity).pay_now, 0);
   }
 });

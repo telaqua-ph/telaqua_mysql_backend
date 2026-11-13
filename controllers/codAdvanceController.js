@@ -1,9 +1,9 @@
 /**
  * controllers/codAdvanceController.js
  *
- * Website COD with a ₹199 partial payment paid via Razorpay at checkout. The ₹199
+ * Website COD with ₹199 per unit (maximum ₹597) paid via Razorpay. The advance
  * is deducted from the order total (after any coupon); the balance is paid in
- * cash on delivery. The COD order is created only after the ₹199 is verified.
+ * cash on delivery. The COD order is created only after the advance is verified.
  */
 
 import { query } from "../config/db.js";
@@ -102,12 +102,12 @@ export async function createCodAdvanceOrder(req, res) {
       promo_code: pricing.promo_code,
       discount_amount: pricing.discount_amount,
       invoice_access_token: invoiceAccess.token,
-      ...codAdvanceBreakdown(financial.finalTotal),
+      ...codAdvanceBreakdown(financial.finalTotal, orderData.quantity),
     });
   } catch (error) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
     console.error("COD advance create-order error:", error);
-    return res.status(500).json({ success: false, message: "We could not start the ₹199 partial payment. Please try again." });
+    return res.status(500).json({ success: false, message: "We could not start the COD partial payment. Please try again." });
   }
 }
 
@@ -130,7 +130,7 @@ export async function verifyCodAdvancePayment(req, res) {
     if (result.status === "created" || result.status === "already_created") {
       return res.status(result.status === "created" ? 201 : 200).json({
         success: true,
-        message: "COD order confirmed. ₹199 partial payment received.",
+        message: "COD order confirmed. Partial payment received.",
         ...orderSummary(result.order),
       });
     }
@@ -141,7 +141,7 @@ export async function verifyCodAdvancePayment(req, res) {
       return res.status(409).json({
         success: false,
         code: "COD_ADVANCE_ORDER_FAILED",
-        message: "Your ₹199 partial payment was received, but we could not confirm the order " +
+        message: "Your COD partial payment was received, but we could not confirm the order " +
           `(${result.reason}). Our team will contact you to complete or refund it. Please do not pay again.`,
       });
     }
@@ -154,7 +154,7 @@ export async function verifyCodAdvancePayment(req, res) {
     console.error("COD advance verify error:", error);
     return res.status(500).json({
       success: false,
-      message: "We could not confirm your payment right now. If ₹199 was debited, do not pay again — it will be confirmed automatically.",
+      message: "We could not confirm your payment right now. If an amount was debited, do not pay again — it will be confirmed automatically.",
     });
   }
 }

@@ -87,3 +87,18 @@ test("revenue SQL subtracts the ₹199 only for partial-payment orders", () => {
   assert.match(sql, /o\.cod_amount_due < COALESCE\(o\.final_total, o\.total_amount\)/);
   assert.equal(codPartialRevenueAdjustmentSql(new Set(["final_total"])), "0");
 });
+
+
+for (const advance of [398, 597]) {
+  test(`invoice PDF and courier flow preserve a ₹${advance} partial payment`, async () => {
+    const order = { ...partialOrder, cod_advance_fee: advance, cod_amount_due: 4497 - advance };
+    assert.equal(isCodPartialPaidOrder(order), true);
+    assert.equal(codCollectableAmount(order), 4497 - advance);
+    assert.equal(buildShipmentPayload(order, { waybill_number: "123" }, warehouse, product).shipments[0].cod_amount, String(4497 - advance));
+    assert.equal(buildShipwayPayload(order, product).order_total, String(4497 - advance));
+    assert.equal(codAmountToCollect(order), 4497 - advance);
+    const pdf = await generateLocalInvoicePdf(order);
+    assert.equal(pdf.contentType, "application/pdf");
+    assert.ok(pdf.buffer.length > 1000);
+  });
+}

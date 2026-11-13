@@ -1,9 +1,9 @@
 /**
- * ₹199 partial payment for website COD orders.
+ * Quantity-based partial payment for website COD orders (₹199 per unit, maximum ₹597).
  *
- * Flow: create a cod_advance_payments attempt + a ₹199 Razorpay order →
+ * Flow: create a cod_advance_payments attempt + a quantity-based Razorpay order →
  * customer pays → verify (browser callback or webhook) → only then create the
- * COD order. The ₹199 is deducted from the order total (after any coupon);
+ * COD order. The advance is deducted from the order total (after any coupon);
  * the balance (cod_amount_due) is collected in cash on delivery.
  * (Orders placed before this used a ₹99 fee charged on top of the total.)
  *
@@ -53,14 +53,14 @@ function round2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
-/** Amounts shown to the customer and stored on the order (₹199 deducted from the total). */
-export function codAdvanceBreakdown(productAmount) {
-  return codPartialBreakdown(productAmount);
+/** Amounts shown to the customer and stored on the order (advance deducted from the total). */
+export function codAdvanceBreakdown(productAmount, quantity = 1) {
+  return codPartialBreakdown(productAmount, quantity);
 }
 
 /** Razorpay amount for the partial payment, in paise. */
-export function codAdvanceAmountPaise(productAmount) {
-  return Math.round(codPartialAmount(productAmount) * 100);
+export function codAdvanceAmountPaise(productAmount, quantity = 1) {
+  return Math.round(codPartialAmount(productAmount, quantity) * 100);
 }
 
 function rupees(paise) {
@@ -93,11 +93,11 @@ export function checkCodAdvancePayment({ rzOrder, rzPayment, razorpayOrderId, ex
 }
 
 /**
- * Starts a COD checkout: records the attempt and creates a ₹199 Razorpay order.
+ * Starts a COD checkout: records the attempt and creates a quantity-based Razorpay order.
  * No order row exists until the payment is verified.
  */
 export async function createCodAdvanceCheckout({ orderData, productAmount, invoiceAccessHash }) {
-  const amountPaise = codAdvanceAmountPaise(productAmount);
+  const amountPaise = codAdvanceAmountPaise(productAmount, orderData.quantity);
   if (amountPaise <= 0) throw new Error("Order total must be positive for a COD partial payment");
   const inserted = await query(
     `INSERT INTO cod_advance_payments
@@ -201,7 +201,7 @@ async function fetchRazorpayState(razorpayOrderId, razorpayPaymentId) {
 }
 
 async function insertCodAdvanceOrder(client, { orderData, pricing, financial, attempt, payment }) {
-  // The partial payment actually captured (₹199), deducted from the total.
+  // The partial payment actually captured, deducted from the total.
   const paidNow = round2(Number(attempt.amount_paise) / 100);
   const core = [
     orderData.customer_name,
@@ -255,7 +255,7 @@ async function insertCodAdvanceOrder(client, { orderData, pricing, financial, at
 }
 
 /**
- * Verifies the ₹199 payment with Razorpay and creates the COD order exactly once.
+ * Verifies the partial payment with Razorpay and creates the COD order exactly once.
  * Safe to call repeatedly (browser verify, refresh, webhook, admin retry).
  *
  * @returns {Promise<{status: "created"|"already_created"|"not_found"|"payment_invalid"|"order_failed", order?: object, reason?: string}>}
