@@ -6,6 +6,7 @@
 
 import { DELHIVERY_SHIPPING_MODE } from "../config/delhiveryConfig.js";
 import { codCollectableAmount } from "../lib/codPartialPayment.js";
+import { isCodOrder } from "./paymentMode.js";
 
 const clean = (value) =>
   String(value ?? "")
@@ -15,9 +16,10 @@ const clean = (value) =>
 
 function paymentModeOf(order) {
   const pay = String(order?.payment_status || "").trim().toLowerCase();
-  const offlineSold = String(order?.offline_sold || "").trim().toLowerCase();
-  if (pay === "paid" || offlineSold.startsWith("cod paid")) return "Pre-paid";
-  return /cod|cash/i.test(String(order?.payment_method || "")) ? "COD" : "Pre-paid";
+  if (pay === "paid") return "Pre-paid";
+  // Historical offline markers are not proof of payment. Pending COD must
+  // still collect the stored balance, even if a stale cash/QR marker exists.
+  return isCodOrder(order) ? "COD" : "Pre-paid";
 }
 
 export function buildShipmentPayload(order, shipment, warehouse, product) {

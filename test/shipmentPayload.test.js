@@ -109,3 +109,26 @@ test("COD shipment payload includes the same package details plus cod_amount", (
   assert.equal(item.shipment_width, 10);
   assert.equal(item.shipment_height, 5);
 });
+
+test("pending COD with a stale cash or QR marker still collects payment", () => {
+  for (const offline_sold of ["COD Paid-Cash", "COD Paid-QR"]) {
+    for (const [id, total] of [[1175, 1799], [1184, 1499], [1187, 1499], [1279, 1799], [1297, 3598]]) {
+      const order = { ...codOrder, id, payment_mode: "cod", payment_status: "Pending", offline_sold, total_amount: total };
+      const item = buildShipmentPayload(order, shipment, warehouse, product).shipments[0];
+      assert.equal(item.payment_mode, "COD", String(id));
+      assert.equal(item.cod_amount, String(total), String(id));
+    }
+  }
+});
+
+test("paid COD remains prepaid for the courier without relying on an offline marker", () => {
+  const item = buildShipmentPayload({ ...codOrder, payment_status: "Paid" }, shipment, warehouse, product).shipments[0];
+  assert.equal(item.payment_mode, "Pre-paid");
+  assert.equal(item.cod_amount, undefined);
+});
+
+test("stored COD mode is honored when the payment method is absent", () => {
+  const item = buildShipmentPayload({ ...codOrder, payment_mode: "cod", payment_method: null, payment_status: "Pending" }, shipment, warehouse, product).shipments[0];
+  assert.equal(item.payment_mode, "COD");
+  assert.equal(item.cod_amount, "1898");
+});
