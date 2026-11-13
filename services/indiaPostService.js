@@ -4,7 +4,7 @@
  * Docs: https://app.indiapost.gov.in/developer-portal/apidoc
  *   POST {base}/v1/access/login                      -> access_token (Bearer, ~15 min)
  *   POST {base}/process-articles/{customId}          -> booking (JSON body { articles: [...] })
- *   GET  {base}/v1/tracking/{trackingNumber}         -> currentStatus + history
+ *   POST {base}/v1/tracking/bulk                     -> { bulk: [articleNumber] }; returns data[] with booking_details, tracking_details[], del_status
  *
  * .env (Hostinger)
  *   INDIA_POST_ENV=sandbox                       (sandbox | production)
@@ -252,6 +252,7 @@ export function validateIndiaPostArticle(article) {
   const errors = [];
   if (!/^\d{6}$/.test(article.receiver_pincode)) errors.push("Customer pincode must be 6 digits.");
   if (!/^\d{10}$/.test(article.receiver_mobile_no)) errors.push("Customer mobile number must be 10 digits.");
+  else if (!/^[6789]/.test(article.receiver_mobile_no)) errors.push("Customer mobile number must start with 6, 7, 8 or 9 (India Post rule). Edit the customer's phone first.");
   if (!article.receiver_add_line_1 || !article.receiver_city) errors.push("Customer address and city are required.");
   if (article.barcode_no && !/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(article.barcode_no)) errors.push("Article number must look like EB123456789IN.");
   return errors;
@@ -299,35 +300,68 @@ export function mapIndiaPostStatus(status) {
   if (/not delivered|undelivered|attempt|door locked|addressee (left|absent|not available)|refused|deposit/.test(value)) return "ndr";
   if (/delivered/.test(value)) return "delivered";
   if (/out for delivery|sent for delivery|item onhold|on hold/.test(value)) return "out_for_delivery";
-  if (/booked|received at origin|item received|accepted|booking/.test(value)) return "picked_up";
+  if (/booked|received at origin|accepted|booking|pickup request/.test(value)) return "picked_up";
   if (/transit|dispatched|bagged|received|arrival|arrived|forwarded/.test(value)) return "in_transit";
   return null;
+}
+
+/** Normalizes one CEPT bulk-tracking record for the shipment services. */
+export function parseIndiaPostTrackingRecord(id, record, raw = record) {
+  const bookingDetails = record?.booking_details;
+  const events = Array.isArray(record?.tracking_details)
+    ? record.tracking_details
+    : Array.isArray(record?.history) ? record.history : [];
+  const history = events.map((event) => {
+    let status = text(event?.event || event?.status || event?.description);
+    const remarks = text(event?.remarks);
+    if (status && remarks && !/^intimation delivered$/i.test(remarks)) status = `${status} - ${remarks}`;
+    return {
+      status,
+      location: text(event?.office || event?.location) || null,
+      eventTime: event?.date || event?.timestamp || event?.event_date || null,
+      rts: event?.rts === true || String(event?.rts).toLowerCase() === "true",
+      raw: event,
+    };
+  }).filter((event) => event.status).sort((a, b) => {
+    const aTime = Date.parse(a.eventTime);
+    const bTime = Date.parse(b.eventTime);
+    if (!Number.isFinite(aTime) || !Number.isFinite(bTime)) return 0;
+    return aTime - bTime;
+  });
+  const latest = history.at(-1);
+  let currentStatus = text(latest?.status || record?.currentStatus || record?.status);
+  let fulfillmentStatus = mapIndiaPostStatus(currentStatus);
+  const deliveryStatus = text(record?.del_status?.del_status || record?.del_status).toLowerCase();
+  if (deliveryStatus === "delivered" || bookingDetails?.delivery_confirmed_on) {
+    fulfillmentStatus = "delivered";
+    if (!/delivered/i.test(currentStatus)) currentStatus = "Item Delivered";
+  } else if (history.some((event) => event.rts) && fulfillmentStatus !== "returned") {
+    fulfillmentStatus = "rto";
+  }
+  if (!currentStatus && !history.length) return null;
+  return {
+    barcode: id,
+    currentStatus,
+    fulfillmentStatus,
+    location: latest?.location || bookingDetails?.delivery_location || null,
+    estimatedDelivery: record?.estimatedDelivery || null,
+    history,
+    raw,
+  };
 }
 
 /** Live tracking for one article. Returns null when India Post has no record yet (404). */
 export async function getIndiaPostTracking(barcode, { config = getIndiaPostConfig() } = {}) {
   const id = text(barcode).toUpperCase();
   if (!/^[A-Z0-9]{8,20}$/.test(id)) throw indiaPostError("INDIA_POST_ORDER_DATA_INVALID", "Invalid India Post article number.");
-  const { status, ok, data } = await authorizedCall(`/v1/tracking/${encodeURIComponent(id)}`, {}, config);
+  const { status, ok, data } = await authorizedCall("/v1/tracking/bulk", { method: "POST", body: { bulk: [id] } }, config);
   if (status === 404) return null;
+  const message = upstreamMessage(data, "unexpected response");
   if (!ok || data?.success === false) {
-    throw indiaPostError("INDIA_POST_UPSTREAM_ERROR", `India Post tracking failed (HTTP ${status}): ${upstreamMessage(data, "unexpected response")}`, { httpStatus: status });
+    if (/no (data|record)|not found/i.test(message)) return null;
+    throw indiaPostError("INDIA_POST_UPSTREAM_ERROR", `India Post tracking failed (HTTP ${status}): ${message}`, { httpStatus: status });
   }
-  const body = data?.data || data;
-  const history = (Array.isArray(body?.history) ? body.history : []).map((event) => ({
-    status: text(event.status || event.event || event.description),
-    location: text(event.location || event.office) || null,
-    eventTime: event.timestamp || event.date || null,
-    raw: event,
-  })).filter((event) => event.status);
-  const currentStatus = text(body?.currentStatus || body?.status || history.at(-1)?.status);
-  return {
-    barcode: id,
-    currentStatus,
-    fulfillmentStatus: mapIndiaPostStatus(currentStatus),
-    location: history.at(-1)?.location || null,
-    estimatedDelivery: body?.estimatedDelivery || null,
-    history,
-    raw: data,
-  };
+  const list = Array.isArray(data?.data) ? data.data : (data?.data ? [data.data] : []);
+  const record = list.find((item) => text(item?.booking_details?.article_number).toUpperCase() === id) || list[0] || null;
+  return record ? parseIndiaPostTrackingRecord(id, record, data) : null;
 }

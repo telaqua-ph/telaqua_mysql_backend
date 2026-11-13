@@ -54,7 +54,7 @@ function fakeIndiaPost({ booking, tracking, loginStatus = 200 } = {}) {
         : jsonResponse(401, { success: false, message: "Invalid credentials" });
     }
     if (url.includes("/process-articles/")) return jsonResponse(200, booking);
-    if (url.includes("/v1/tracking/")) return tracking ? jsonResponse(200, tracking) : jsonResponse(404, { success: false });
+    if (url.includes("/v1/tracking/bulk")) return tracking ? jsonResponse(200, tracking) : jsonResponse(404, { success: false });
     throw new Error(`unexpected url ${url}`);
   });
   return calls;
@@ -120,6 +120,10 @@ test("booking: valid article returns its article number; rejected article return
   await assert.rejects(() => bookIndiaPostArticle(order, { config }), (error) => error.code === "INDIA_POST_REJECTED" && /6 digits/.test(error.message));
 
   await assert.rejects(() => bookIndiaPostArticle({ ...order, pincode: "53400" }, { config }), { code: "INDIA_POST_ORDER_DATA_INVALID" });
+  await assert.rejects(
+    () => bookIndiaPostArticle({ ...order, phone: "5123456789" }, { config }),
+    (error) => error.code === "INDIA_POST_ORDER_DATA_INVALID" && /start with 6, 7, 8 or 9/.test(error.message)
+  );
 });
 
 test("tracking: statuses map to Tel-Aqua fulfillment stages; unknown article is null", async () => {
@@ -132,6 +136,47 @@ test("tracking: statuses map to Tel-Aqua fulfillment stages; unknown article is 
   assert.equal(mapIndiaPostStatus("Item returned to sender"), "returned");
   fakeIndiaPost({ tracking: null });
   assert.equal(await getIndiaPostTracking("EB000000000IN", { config }), null);
+});
+
+test("tracking: live bulk API response is parsed", async () => {
+  const liveRecord = {
+    booking_details: {
+      article_number: "JH040789405IN",
+      booked_at: "Changanacherry HO",
+      booked_on: "2026-09-05T23:24:16.038+05:30",
+      origin_pincode: "686101",
+      destination_pincode: "689694",
+      tariff: 42.63,
+      article_type: "SP_INLAND_PARCEL",
+      delivery_location: "Kalanjoor SO",
+      delivery_confirmed_on: null,
+    },
+    tracking_details: [
+      { date: "2026-09-07T12:56:46.613Z", time: "12:56:46", office: "Kalanjoor SO", officeid: "22660021", event: "Taken out for delivery", remarks: "", rts: false },
+      { date: "2026-09-06T00:36:05.794Z", office: "Changanacherry HO", event: "Item Dispatched", remarks: "", rts: false },
+      { date: "2026-09-05T23:24:16.038Z", office: "Changanacherry HO", event: "Item Booked", remarks: "", rts: false },
+    ],
+    del_status: { del_status: "not delivered" },
+  };
+  const calls = fakeIndiaPost({ tracking: { status_code: 200, success: true, message: "data retrieved successfully", data: [liveRecord] } });
+  const tracked = await getIndiaPostTracking("JH040789405IN", { config });
+  const request = calls.find((call) => call.url.includes("/v1/tracking/bulk"));
+  assert.equal(request.url, "https://test.cept.gov.in/beextcustomer/v1/tracking/bulk");
+  assert.deepEqual(request.body, { bulk: ["JH040789405IN"] });
+  assert.equal(tracked.history.length, 3);
+  assert.equal(tracked.history[0].status, "Item Booked");
+  assert.equal(tracked.currentStatus, "Taken out for delivery");
+  assert.equal(tracked.fulfillmentStatus, "out_for_delivery");
+  assert.equal(tracked.location, "Kalanjoor SO");
+
+  fakeIndiaPost({ tracking: { success: true, data: [{ ...liveRecord, del_status: { del_status: "delivered" } }] } });
+  assert.equal((await getIndiaPostTracking("JH040789405IN", { config })).fulfillmentStatus, "delivered");
+
+  fakeIndiaPost({ tracking: { success: true, data: [{
+    ...liveRecord,
+    tracking_details: [{ ...liveRecord.tracking_details[0], rts: true }, ...liveRecord.tracking_details.slice(1)],
+  }] } });
+  assert.equal((await getIndiaPostTracking("JH040789405IN", { config })).fulfillmentStatus, "rto");
 });
 
 test("Delhivery code never touches India Post shipments; tracking link points to our page", () => {
