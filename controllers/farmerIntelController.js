@@ -1,5 +1,6 @@
 import { pool, query } from "../config/db.js";
 import { normalizeCourierAssignment } from "../services/courierAssignment.js";
+import farmerIntelBasemap from "../utils/farmerIntelBasemap.js";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const PIN_RE = /^[0-9A-Za-z -]{3,10}$/;
@@ -26,6 +27,10 @@ export function parseMapFilters(source = {}) {
   }
   const district = cleanText(source.district, 120);
   return { from: from || null, to: to || null, status: status || "all", district: district || null };
+}
+
+export function getMapBasemap(_req, res) {
+  return res.json({ success: true, basemap: farmerIntelBasemap });
 }
 
 // One row per order: shipment state is calculated with EXISTS to avoid

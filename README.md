@@ -102,6 +102,12 @@ npm run deploy
 
 > Handlers currently contain placeholders only. Business logic will be added next.
 
+## Farmer Intel Map
+
+Run `npm run migrate:farmer-intel` against the Tel-Aqua MySQL database to create the map tables and seed pincode centroid lookups. The seed contains only pincode, district/state, and approximate centroid coordinates; `INSERT IGNORE` preserves any existing curated coordinate rows. It contains no order snapshots or customer details. Map summaries continue to aggregate live orders from the database.
+
+The `/api/admin/farmer-intel` routes, including `GET /basemap`, require an authenticated active admin with `can_view_farmer_intel_map`. Grant that permission explicitly after the migration. The basemap response contains India and state boundary geometry only.
+
 ## CORS
 
 Configure allowed front-end origins via `CORS_ORIGINS` in `.env`. Default CORS headers are also set in `vercel.json` for development.
