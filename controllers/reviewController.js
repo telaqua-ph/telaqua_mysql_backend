@@ -5,6 +5,7 @@ const PHONE_MATCH_SQL = "BINARY RIGHT(REGEXP_REPLACE(o.phone, '[^0-9]', ''), 10)
 const DELIVERED_SQL = `(
   LOWER(COALESCE(o.order_status, '')) IN ('delivered', 'completed', 'fulfilled')
   OR LOWER(COALESCE(o.shipment_status, '')) IN ('delivered', 'completed', 'fulfilled')
+  OR LOWER(COALESCE(o.tracking_status, '')) IN ('delivered', 'completed', 'fulfilled')
   OR LOWER(COALESCE(s.fulfillment_status, '')) IN ('delivered', 'completed', 'fulfilled')
   OR LOWER(COALESCE(s.shipment_status, '')) IN ('delivered', 'completed', 'fulfilled')
 )`;
