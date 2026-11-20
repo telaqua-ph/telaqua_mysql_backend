@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS product_reviews (
   rating TINYINT UNSIGNED NOT NULL,
   title VARCHAR(140) NOT NULL,
   body TEXT NOT NULL,
-  status ENUM('pending', 'published', 'hidden') NOT NULL DEFAULT 'pending',
+  status ENUM('pending', 'published', 'hidden') NOT NULL DEFAULT 'published',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),

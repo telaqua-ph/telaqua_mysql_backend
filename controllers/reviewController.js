@@ -48,11 +48,11 @@ export async function createReview(req, res) {
     WHERE o.id = ? AND ${PHONE_MATCH_SQL} AND ${DELIVERED_SQL} LIMIT 1`, [orderId, req.customer.phone]);
   if (!owned.rows[0]) return res.status(403).json({ success: false, message: "Only your delivered Tel-Aqua pH Meter orders can be reviewed." });
   try {
-    await query(`INSERT INTO product_reviews (product_key, order_id, customer_phone, customer_name, rating, title, body)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`, [PRODUCT_KEY, orderId, req.customer.phone, customerName(owned.rows[0].customer_name), rating, title, body]);
+    await query(`INSERT INTO product_reviews (product_key, order_id, customer_phone, customer_name, rating, title, body, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'published')`, [PRODUCT_KEY, orderId, req.customer.phone, customerName(owned.rows[0].customer_name), rating, title, body]);
   } catch (error) {
     if (error?.code === "ER_DUP_ENTRY") return res.status(409).json({ success: false, message: "You have already submitted a review for this order." });
     throw error;
   }
-  return res.status(201).json({ success: true, message: "Thank you. Your review was submitted for checking before publication." });
+  return res.status(201).json({ success: true, message: "Thank you. Your review is now published." });
 }
