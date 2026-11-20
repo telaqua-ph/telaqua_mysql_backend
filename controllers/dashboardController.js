@@ -32,7 +32,7 @@ function parseRange(req) {
   return { from, to };
 }
 
-function mapStatsRow(row, from, to) {
+function mapStatsRow(row, from, to, deviceCounts = row) {
   return {
     totalOrders: Number(row.total_orders || 0),
     razorpayFailedPendingOrders: Number(row.razorpay_failed_pending_orders || 0),
@@ -45,19 +45,22 @@ function mapStatsRow(row, from, to) {
     cancelledOrders: Number(row.cancelled_orders || 0),
     shipmentsCreated: Number(row.shipments_created || 0),
     unseenOrders: Number(row.unseen_orders || 0),
-    devicesSold: Number(row.devices_sold || 0),
-    codPendingDevices: Number(row.cod_pending_devices || 0),
+    // Device totals come from the CTE-free aggregate. MariaDB 11.8 can
+    // incorrectly omit newer rows from the device_orders CTE when prepared
+    // through mysql2's execute() path.
+    devicesSold: Number(deviceCounts.devices_sold || 0),
+    codPendingDevices: Number(deviceCounts.cod_pending_devices || 0),
     revenueReceived: Number(row.revenue_received || 0),
-    todayDevicesSold: Number(row.today_devices_sold || 0),
-    todayCodPendingDevices: Number(row.today_cod_pending_devices || 0),
+    todayDevicesSold: Number(deviceCounts.today_devices_sold || 0),
+    todayCodPendingDevices: Number(deviceCounts.today_cod_pending_devices || 0),
     todayRevenue: Number(row.today_revenue || 0),
-    monthDevicesSold: Number(row.month_devices_sold || 0),
-    monthCodPendingDevices: Number(row.month_cod_pending_devices || 0),
+    monthDevicesSold: Number(deviceCounts.month_devices_sold || 0),
+    monthCodPendingDevices: Number(deviceCounts.month_cod_pending_devices || 0),
     monthRevenue: Number(row.month_revenue || 0),
     analysis: {
       from,
       to,
-      devicesSold: Number(row.analysis_devices_sold || 0),
+      devicesSold: Number(deviceCounts.analysis_devices_sold || 0),
       revenueReceived: Number(row.analysis_revenue_received || 0),
       pendingRevenue: Number(row.analysis_pending_revenue || 0),
     },
@@ -309,6 +312,93 @@ export function istCalendarDates(now = new Date()) {
   return { todayIst: ist, monthStartIst: `${ist.slice(0, 8)}01` };
 }
 
+function rtoOrderPredicate(columns, { shipmentAlias = null } = {}) {
+  const rtoStatuses = "'rto', 'returned'";
+  const signals = [];
+  if (columns.has("fulfillment_status")) {
+    signals.push(`LOWER(TRIM(COALESCE(o.fulfillment_status, ''))) IN (${rtoStatuses})`);
+  }
+  if (columns.has("shipment_status")) {
+    signals.push(`LOWER(COALESCE(o.shipment_status, '')) REGEXP '(^|[^a-z])rto([^a-z]|$)|return'`);
+  }
+  if (shipmentAlias) {
+    signals.push(`LOWER(TRIM(COALESCE(${shipmentAlias}.fulfillment_status, ''))) IN (${rtoStatuses})`);
+    signals.push(`LOWER(COALESCE(${shipmentAlias}.shipment_status, '')) REGEXP '(^|[^a-z])rto([^a-z]|$)|return'`);
+  }
+  return signals.length ? `(${signals.join(" OR ")})` : "FALSE";
+}
+
+/**
+ * Builds the prepared-statement-safe device aggregate. This deliberately has
+ * no CTEs or derived tables: MariaDB 11.8 has returned incomplete
+ * device_orders CTE results through mysql2 execute() for newer orders.
+ */
+export function buildDeviceCountsQuery({ columns, includeShipmentsTable, includeInventoryHistory, from, to, now = new Date() }) {
+  const codExpr = codOrderPredicate(columns, "o");
+  const deviceConfirmedExpr = deviceConfirmationPredicate(columns, "o");
+  const cancellationExpr = cancellationPredicate(columns, "o", includeInventoryHistory, includeShipmentsTable);
+  const rtoExpr = rtoOrderPredicate(columns, { shipmentAlias: includeShipmentsTable ? "s" : null });
+  const quantityExpr = columns.has("quantity") ? "COALESCE(o.quantity, 0)" : "0";
+  const paymentStatusExpr = columns.has("payment_status")
+    ? "LOWER(TRIM(COALESCE(o.payment_status, '')))"
+    : "''";
+  const createdDateExpr = createdDateExpression(columns, "o");
+  const paidDateExpr = paidDateExpression(columns, "o");
+  const countedAtExpr = `CASE WHEN ${codExpr} THEN ${createdDateExpr} ELSE ${paidDateExpr} END`;
+  const isPaidExpr = `${paymentStatusExpr} = 'paid'`;
+  const eligibleExpr = `
+    NOT ${cancellationExpr}
+    AND ${deviceConfirmedExpr}
+    AND (${codExpr} OR (NOT (${codExpr}) AND ${isPaidExpr}))
+    AND NOT ${rtoExpr}
+    ${columns.has("is_test_order") ? "AND COALESCE(o.is_test_order, 0) = 0" : ""}`;
+  const { todayIst, monthStartIst } = istCalendarDates(now);
+  const todayStartExpr = istDateParameterStartExpression(`'${todayIst}'`);
+  const monthStartExpr = istDateParameterStartExpression(`'${monthStartIst}'`);
+  const todayExpr = `${countedAtExpr} >= ${todayStartExpr}
+    AND ${countedAtExpr} < DATE_ADD(${todayStartExpr}, INTERVAL 1 DAY)`;
+  const monthExpr = `${countedAtExpr} >= ${monthStartExpr}
+    AND ${countedAtExpr} < DATE_ADD(${monthStartExpr}, INTERVAL 1 MONTH)`;
+  const periodExpr = `(? IS NULL OR ${countedAtExpr} >= ${istDateParameterStartExpression("?")})
+    AND (? IS NULL OR ${countedAtExpr} < DATE_ADD(${istDateParameterStartExpression("?")}, INTERVAL 1 DAY))`;
+  const shipmentsJoin = includeShipmentsTable
+    ? "LEFT JOIN shipments s ON s.order_id = o.id AND s.sequence_no = 1"
+    : "";
+
+  return {
+    sql: `SELECT
+      CAST(COALESCE(SUM(CASE WHEN ${isPaidExpr} THEN ${quantityExpr} ELSE 0 END), 0) AS SIGNED) AS devices_sold,
+      CAST(COALESCE(SUM(CASE WHEN NOT (${isPaidExpr}) THEN ${quantityExpr} ELSE 0 END), 0) AS SIGNED) AS cod_pending_devices,
+      CAST(COALESCE(SUM(CASE WHEN ${isPaidExpr} AND ${todayExpr} THEN ${quantityExpr} ELSE 0 END), 0) AS SIGNED) AS today_devices_sold,
+      CAST(COALESCE(SUM(CASE WHEN NOT (${isPaidExpr}) AND ${todayExpr} THEN ${quantityExpr} ELSE 0 END), 0) AS SIGNED) AS today_cod_pending_devices,
+      CAST(COALESCE(SUM(CASE WHEN ${isPaidExpr} AND ${monthExpr} THEN ${quantityExpr} ELSE 0 END), 0) AS SIGNED) AS month_devices_sold,
+      CAST(COALESCE(SUM(CASE WHEN NOT (${isPaidExpr}) AND ${monthExpr} THEN ${quantityExpr} ELSE 0 END), 0) AS SIGNED) AS month_cod_pending_devices,
+      CAST(COALESCE(SUM(CASE WHEN ${periodExpr} THEN ${quantityExpr} ELSE 0 END), 0) AS SIGNED) AS analysis_devices_sold
+    FROM orders o
+    ${shipmentsJoin}
+    WHERE ${eligibleExpr}`,
+    params: [from, from, to, to],
+  };
+}
+
+/** CTE-free source of truth for all dashboard and inventory device quantities. */
+export async function fetchDeviceCounts({ from, to }) {
+  const [columns, includeShipmentsTable, includeInventoryHistory] = await Promise.all([
+    readOrdersColumns(),
+    hasShipmentsTable(),
+    hasInventoryHistoryTable(),
+  ]);
+  const { sql, params } = buildDeviceCountsQuery({
+    columns,
+    includeShipmentsTable,
+    includeInventoryHistory,
+    from,
+    to,
+  });
+  const { rows } = await query(sql, params);
+  return rows[0] || {};
+}
+
 async function fetchDashboardStats({ adminId, from, to }) {
   const columns = await readOrdersColumns();
   const includeViews = await hasAdminOrderViewsTable();
@@ -397,8 +487,9 @@ async function fetchDashboardStats({ adminId, from, to }) {
          ${paidTestFilter}`
     : "SELECT 0 AS advance_amount, NULL AS advance_paid_at, NULL AS advance_ordered_at FROM DUAL WHERE FALSE";
 
-  const { rows } = await query(
-    `WITH order_rows AS (
+  const [statsResult, deviceCounts] = await Promise.all([
+    query(
+      `WITH order_rows AS (
        SELECT
          o.*,
          ${shipmentsSelect}
@@ -605,10 +696,15 @@ async function fetchDashboardStats({ adminId, from, to }) {
      FROM operational
      CROSS JOIN sales
      CROSS JOIN analysis`,
-    includeViews ? [adminId, ...analysisParams] : analysisParams
-  );
+      includeViews ? [adminId, ...analysisParams] : analysisParams
+    ),
+    fetchDeviceCounts({ from, to }),
+  ]);
+  const { rows } = statsResult;
 
-  return rows[0] || null;
+  // Keep the main CTE query for operational/revenue data, but never use its
+  // device_orders values. The CTE-free aggregate is reliable on MariaDB 11.8.
+  return rows[0] ? { ...rows[0], ...deviceCounts } : null;
 }
 
 /**
