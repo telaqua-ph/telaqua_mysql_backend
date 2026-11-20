@@ -34,3 +34,9 @@ coverage/
 
 # Generated customer invoice PDFs (keep directory via .gitkeep)
 public/invoices/*.pdf
+
+# Local and deployment secrets
+.env
+.env.*
+!.env.example
+!.env.*.example

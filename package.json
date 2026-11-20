@@ -14,6 +14,7 @@
     "lint": "echo \"No linter configured yet\"",
     "migrate:customer-auth": "node scripts/migrate-customer-auth.js",
     "migrate:product-reviews": "node scripts/migrate-product-reviews.js",
+    "migrate:farmer-intel": "node scripts/migrate-farmer-intel-map.js",
     "migrate:inventory": "node scripts/migrate-inventory.js",
     "migrate:order-views": "node scripts/migrate-order-views.js",
     "migrate:delhivery": "node scripts/migrate-delhivery-logistics.js",

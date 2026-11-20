@@ -47,6 +47,7 @@ import { isSafeFailedShipmentPlaceholder } from "../services/shipmentDeletionSaf
 import { resolveOrderEmail } from "../utils/guestEmail.js";
 import { onlineLeadPredicate } from "../services/leads.js";
 import { isCodAdvanceFeeRequired } from "../services/codAdvanceService.js";
+import { hasCourierAssignment } from "../services/courierAssignment.js";
 
 const ALLOWED_ORDER_STATUSES = [
   "New",
@@ -83,6 +84,7 @@ async function attachLatestShipments(orders) {
         ...order,
         shipment_record_id: shipment.id,
         shipping_provider: shipment.provider || "Delhivery",
+        courier_name: shipment.courier_name || null,
         carrier_id: shipment.carrier_id || null,
         fulfillment_status: shipment.fulfillment_status || order.fulfillment_status,
         waybill: shipment.waybill_number || order.waybill,
@@ -2096,6 +2098,13 @@ export async function updateShipmentStatus(req, res) {
       }
 
       if (shipment) {
+        if (!hasCourierAssignment(shipment)) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({
+            success: false,
+            message: "Assign a courier to this shipment before marking it as shipped, delivered, or returned.",
+          });
+        }
         // shipment_status_at = NOW() so older courier events can't overwrite this manual update.
         try {
           await client.query(
