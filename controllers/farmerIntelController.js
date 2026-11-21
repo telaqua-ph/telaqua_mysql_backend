@@ -35,7 +35,7 @@ export function getMapBasemap(_req, res) {
 
 // Only real orders appear on the map: COD orders (paid or still to collect) and
 // online orders whose payment is Paid. Unpaid/failed Razorpay checkouts (Leads)
-// are excluded, so the map matches the confirmed orders in the dashboard.
+// are excluded. Cancelled orders stay in, matching the Dashboard's Total Orders.
 export const CONFIRMED_ORDER_SQL = `(
     LOWER(TRIM(COALESCE(o.payment_mode, ''))) = 'cod'
     OR (
@@ -58,8 +58,13 @@ export function buildMapScope(filters) {
     dateSql.push("COALESCE((SELECT NULLIF(TRIM(pg.district), '') FROM pincode_geocodes pg WHERE pg.pincode = TRIM(o.pincode) LIMIT 1), NULLIF(TRIM(o.city), '')) = ?");
     params.push(filters.district);
   }
-  const returned = `EXISTS (SELECT 1 FROM shipments sr WHERE sr.order_id = o.id AND LOWER(COALESCE(sr.fulfillment_status, '')) IN ('rto','returned'))`;
-  const delivered = `EXISTS (SELECT 1 FROM shipments sd WHERE sd.order_id = o.id AND LOWER(COALESCE(sd.fulfillment_status, '')) = 'delivered')`;
+  // Delivery state can live on the shipments table (current courier flow) or only
+  // on the order row (older Delhivery orders and manual/admin status updates).
+  // Read both so delivered/returned match the Orders page and the Dashboard.
+  const returned = `(LOWER(TRIM(COALESCE(o.fulfillment_status, ''))) IN ('rto','returned')
+    OR EXISTS (SELECT 1 FROM shipments sr WHERE sr.order_id = o.id AND LOWER(COALESCE(sr.fulfillment_status, '')) IN ('rto','returned')))`;
+  const delivered = `(LOWER(TRIM(COALESCE(o.fulfillment_status, ''))) = 'delivered'
+    OR EXISTS (SELECT 1 FROM shipments sd WHERE sd.order_id = o.id AND LOWER(COALESCE(sd.fulfillment_status, '')) = 'delivered'))`;
   let statusSql = "";
   if (filters.status === "delivered") statusSql = ` AND ${delivered} AND NOT ${returned}`;
   if (filters.status === "returned") statusSql = ` AND ${returned}`;

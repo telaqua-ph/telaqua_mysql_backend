@@ -48,3 +48,10 @@ test("map scope excludes unpaid online (Razorpay) orders but keeps COD and paid 
   assert.match(scope.where, /payment_mode, ''\)\)\) = 'cod'/);
   assert.match(scope.where, /payment_status, ''\)\)\) = 'paid'/);
 });
+
+test("map reads delivered/returned from the order row too, and keeps cancelled orders", () => {
+  const scope = buildMapScope({ from: null, to: null, status: "all", district: null });
+  assert.match(scope.delivered, /o\.fulfillment_status/);
+  assert.match(scope.returned, /o\.fulfillment_status/);
+  assert.doesNotMatch(scope.where, /cancel/);
+});
