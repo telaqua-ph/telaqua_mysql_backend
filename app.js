@@ -97,6 +97,7 @@ app.use(
       "Date",
       "X-Api-Version",
       "X-Order-Token",
+      "X-Farmer-Intel-Token",
     ],
   })
 );

@@ -33,6 +33,8 @@ export function requireAuth(req, res, next) {
 
   try {
     const payload = verifyToken(token);
+    // A Farmer Intel map token must never work as an admin login token.
+    if (payload?.type === "farmer_intel") throw new Error("Wrong token type");
     req.user = payload;
     return next();
   } catch {

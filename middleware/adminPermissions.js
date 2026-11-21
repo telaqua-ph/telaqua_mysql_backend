@@ -1,4 +1,9 @@
 import { query } from "../config/db.js";
+import {
+  FARMER_INTEL_TOKEN_HEADER,
+  findActiveFarmerIntelUser,
+  verifyFarmerIntelToken,
+} from "../services/farmerIntelAuth.js";
 
 /**
  * Permissions are deliberately looked up for every request instead of being
@@ -30,6 +35,45 @@ export function requireFarmerIntelAccess({ customerData = false } = {}) {
       if (error?.code === "ER_NO_SUCH_TABLE") {
         return res.status(503).json({ success: false, message: "Farmer Intel Map migration is required." });
       }
+      return next(error);
+    }
+  };
+}
+
+/**
+ * Second lock for the Farmer Intel Map. Runs after the normal admin login check.
+ * The request must also carry a valid Farmer Intel token (separate email + password)
+ * issued to this same admin session. 403 (not 401) so the admin is not logged out.
+ */
+export function requireFarmerIntelLogin() {
+  return async (req, res, next) => {
+    const lockedResponse = (message) => res.status(403).json({
+      success: false,
+      code: "FARMER_INTEL_LOGIN_REQUIRED",
+      message,
+    });
+    const raw = String(req.headers[FARMER_INTEL_TOKEN_HEADER] || "").trim();
+    if (!raw) return lockedResponse("Farmer Intel Map is locked. Sign in with your Farmer Intel email and password.");
+    let payload;
+    try {
+      payload = verifyFarmerIntelToken(raw);
+    } catch {
+      return lockedResponse("Your Farmer Intel session has expired. Please sign in again.");
+    }
+    const adminId = Number(req.admin?.id ?? req.user?.admin_id);
+    if (Number(payload.admin_id) !== adminId) {
+      return lockedResponse("Farmer Intel session does not belong to this admin login. Please sign in again.");
+    }
+    try {
+      const user = await findActiveFarmerIntelUser(payload.fi_user_id);
+      if (!user) return lockedResponse("This Farmer Intel login is no longer active.");
+      req.farmerIntelPermissions = {
+        canViewCustomerData: Boolean(Number(user.can_view_customer_data)),
+        canManageCouriers: Boolean(Number(user.can_manage_couriers)),
+      };
+      req.farmerIntelUser = { id: user.id, email: user.email };
+      return next();
+    } catch (error) {
       return next(error);
     }
   };
