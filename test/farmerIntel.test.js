@@ -40,3 +40,11 @@ test("courier assignments keep Shipway aggregator and actual carrier distinct", 
   });
   assert.throws(() => normalizeCourierAssignment({ provider: "Delhivery", carrier_name: "India Post" }), /matching/);
 });
+
+test("map scope excludes unpaid online (Razorpay) orders but keeps COD and paid orders", async () => {
+  const { buildMapScope } = await import("../controllers/farmerIntelController.js");
+  const scope = buildMapScope({ from: null, to: null, status: "all", district: null });
+  assert.match(scope.where, /is_test_order = 0/);
+  assert.match(scope.where, /payment_mode, ''\)\)\) = 'cod'/);
+  assert.match(scope.where, /payment_status, ''\)\)\) = 'paid'/);
+});

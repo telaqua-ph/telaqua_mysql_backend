@@ -33,6 +33,18 @@ export function getMapBasemap(_req, res) {
   return res.json({ success: true, basemap: farmerIntelBasemap });
 }
 
+// Only real orders appear on the map: COD orders (paid or still to collect) and
+// online orders whose payment is Paid. Unpaid/failed Razorpay checkouts (Leads)
+// are excluded, so the map matches the confirmed orders in the dashboard.
+export const CONFIRMED_ORDER_SQL = `(
+    LOWER(TRIM(COALESCE(o.payment_mode, ''))) = 'cod'
+    OR (
+      LOWER(TRIM(COALESCE(o.payment_mode, ''))) NOT IN ('cod', 'razorpay')
+      AND LOWER(TRIM(COALESCE(o.payment_method, ''))) IN ('cod', 'cash on delivery', 'cash_on_delivery')
+    )
+    OR LOWER(TRIM(COALESCE(o.payment_status, ''))) = 'paid'
+  )`;
+
 // One row per order: shipment state is calculated with EXISTS to avoid
 // double-counting an order that has several shipment rows.
 export function buildMapScope(filters) {
@@ -53,7 +65,7 @@ export function buildMapScope(filters) {
   if (filters.status === "returned") statusSql = ` AND ${returned}`;
   if (filters.status === "pending") statusSql = ` AND NOT ${delivered} AND NOT ${returned}`;
   return {
-    where: `WHERE (o.is_test_order = 0 OR o.is_test_order IS NULL)${dateSql.length ? ` AND ${dateSql.join(" AND ")}` : ""}${statusSql}`,
+    where: `WHERE (o.is_test_order = 0 OR o.is_test_order IS NULL) AND ${CONFIRMED_ORDER_SQL}${dateSql.length ? ` AND ${dateSql.join(" AND ")}` : ""}${statusSql}`,
     params,
     delivered,
     returned,
