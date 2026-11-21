@@ -1,6 +1,7 @@
 import { pool, query } from "../config/db.js";
 import { normalizeCourierAssignment } from "../services/courierAssignment.js";
 import farmerIntelBasemap from "../utils/farmerIntelBasemap.js";
+import { runPincodeGeocodeSync } from "../services/pincodeGeocodeService.js";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const PIN_RE = /^[0-9A-Za-z -]{3,10}$/;
@@ -119,6 +120,9 @@ export async function getMapSummary(req, res) {
     const allLocations = rowsWithRates(locations.rows);
     const unmapped = allLocations.filter((row) => !row.pincode || row.latitude == null || row.longitude == null);
     const mapped = allLocations.filter((row) => row.pincode && row.latitude != null && row.longitude != null);
+    // New pincodes without a coordinate: look them up in the background so the
+    // dots appear on the next refresh (the 15-minute worker also does this).
+    if (unmapped.some((row) => row.pincode)) setImmediate(() => { runPincodeGeocodeSync().catch(() => {}); });
     const districts = rowsWithRates((await query(
       `SELECT COALESCE(NULLIF(TRIM(g.district), ''), NULLIF(TRIM(o.city), ''), 'Unknown') AS district,
               COALESCE(NULLIF(TRIM(g.state), ''), NULLIF(TRIM(o.state), ''), 'Unknown') AS state,

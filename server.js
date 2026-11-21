@@ -13,6 +13,7 @@ import { startLogisticsTrackingSync, stopLogisticsTrackingSync } from "./service
 import { startShipwayTrackingSync, stopShipwayTrackingSync } from "./services/shipwayTrackingSyncService.js";
 import { startIndiaPostTrackingSync, stopIndiaPostTrackingSync } from "./services/indiaPostShipmentService.js";
 import { startCheckoutReminderSync, stopCheckoutReminderSync } from "./services/checkoutReminderService.js";
+import { startPincodeGeocodeSync, stopPincodeGeocodeSync } from "./services/pincodeGeocodeService.js";
 import { startOrderPushWorker, stopOrderPushWorker } from "./services/orderPushWorker.js";
 import { backfillCodOrderSales } from "./services/inventoryService.js";
 import { isWebPushConfigured } from "./services/webPushConfig.js";
@@ -58,6 +59,8 @@ try {
     // India Post tracking: only runs when INDIA_POST_USERNAME is set.
     startIndiaPostTrackingSync();
     startCheckoutReminderSync();
+    // Farmer Intel Map: add coordinates for new order pincodes (every 15 min).
+    startPincodeGeocodeSync();
     startOrderPushWorker();
     // Existing confirmed COD orders were never written to inventory history.
     backfillCodOrderSales().catch((error) => {
@@ -88,6 +91,7 @@ function shutdown(signal) {
   stopShipwayTrackingSync();
   stopIndiaPostTrackingSync();
   stopCheckoutReminderSync();
+  stopPincodeGeocodeSync();
   stopOrderPushWorker();
   if (!server) {
     process.exit(0);

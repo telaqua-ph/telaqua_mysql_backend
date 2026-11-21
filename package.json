@@ -16,6 +16,7 @@
     "migrate:product-reviews": "node scripts/migrate-product-reviews.js",
     "migrate:farmer-intel": "node scripts/migrate-farmer-intel-map.js",
     "farmer-intel:user": "node scripts/create-farmer-intel-user.js",
+    "farmer-intel:geocode": "node scripts/backfill-pincode-geocodes.js",
     "migrate:inventory": "node scripts/migrate-inventory.js",
     "migrate:order-views": "node scripts/migrate-order-views.js",
     "migrate:delhivery": "node scripts/migrate-delhivery-logistics.js",
