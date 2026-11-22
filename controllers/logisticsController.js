@@ -41,6 +41,7 @@ import { safeShipwayTrackingError } from "../services/shipwayService.js";
 import { sendShipmentTrackingWhatsApp, shipwayTrackingUrl, trackingUrlFor, triggerShipmentTrackingWhatsAppAsync } from "../services/shipmentTrackingNotificationService.js";
 import { INDIA_POST_COURIER_NAME, INDIA_POST_PROVIDER, getIndiaPostConfig, getIndiaPostToken, isIndiaPostShipment, missingIndiaPostSettings } from "../services/indiaPostService.js";
 import { bookOrderWithIndiaPost, refreshIndiaPostShipment } from "../services/indiaPostShipmentService.js";
+import { recordCourierForOrder } from "../services/manualCourierRecord.js";
 
 const asJson = (value) => (value == null ? null : JSON.stringify(value));
 const clean = (value) => String(value ?? "").replace(/[&#%;\\]/g, " ").replace(/\s+/g, " ").trim();
@@ -1394,6 +1395,41 @@ export async function createIndiaPostShipment(req, res) {
       tracking_url: trackingUrlFor(result.barcode, INDIA_POST_PROVIDER),
     });
   } catch (error) { return indiaPostApiError(res, error, "Unable to create the India Post shipment."); }
+}
+
+/**
+ * POST /api/admin/logistics/orders/:orderId/courier-record
+ * Save the courier + article/AWB number for an order booked outside the admin
+ * (India Post portal / post office counter, Shipway or Delhivery panel). No courier API call.
+ * body: { courier: "indiapost" | "shipway" | "delhivery", number: "EN123456789IN", courier_name?: string, notify?: boolean }
+ */
+export async function recordOrderCourier(req, res) {
+  const orderId = idOf(req.params.orderId);
+  if (!orderId) return res.status(400).json({ success: false, message: "Valid order id is required." });
+  const body = req.body || {};
+  try {
+    const result = await recordCourierForOrder(orderId, {
+      courier: body.courier,
+      number: body.number ?? body.waybill ?? body.barcode,
+      courierName: body.courier_name,
+      notify: body.notify === true || body.notify === "true",
+      actorId: adminId(req),
+    });
+    return res.status(201).json({
+      success: true,
+      message: `Saved ${result.courierName} ${result.waybill}.${result.notified ? " Tracking link sent to the customer on WhatsApp." : ""}`,
+      shipment_id: result.shipmentId,
+      waybill: result.waybill,
+      courier: result.courierName,
+      provider: result.provider,
+      fulfillment_status: result.fulfillmentStatus,
+      tracking_url: trackingUrlFor(result.waybill, result.provider),
+    });
+  } catch (error) {
+    const status = error?.httpStatus || 500;
+    if (status >= 500) console.error("Record courier failed", { message: String(error?.message || "").slice(0, 300) });
+    return res.status(status).json({ success: false, message: error?.publicMessage || "Unable to save the courier for this order." });
+  }
 }
 
 /** GET /api/admin/logistics/indiapost/orders/:orderId/tracking */

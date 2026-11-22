@@ -57,6 +57,7 @@ const ROUTES = [
   // ---- shipments / couriers ----
   { m: "POST", p: /^\/admin\/logistics\/orders\/(\d+)\/shipment$/, action: "shipment_created", label: "Created shipment", orderFrom: "path", snap: "os" },
   { m: "POST", p: /^\/admin\/logistics\/orders\/(\d+)\/shipment\/reconcile$/, action: "shipment_reconciled", label: "Reconciled shipment", orderFrom: "path", snap: "os" },
+  { m: "POST", p: /^\/admin\/logistics\/orders\/(\d+)\/courier-record$/, action: "courier_recorded", label: "Recorded courier & article / AWB number", orderFrom: "path", snap: "os" },
   { m: "POST", p: /^\/admin\/logistics\/indiapost\/orders\/(\d+)\/shipment$/, action: "india_post_booked", label: "Booked India Post shipment", orderFrom: "path", snap: "os" },
   { m: "POST", p: /^\/admin\/logistics\/(shipway|indiapost)\/orders\/(\d+)\/tracking\/send-whatsapp$/, action: "tracking_whatsapp_sent", label: "Sent tracking on WhatsApp", orderFrom: "path2" },
   { m: "POST", p: /^\/admin\/logistics\/shipments\/(\d+)\/pickup$/, action: "pickup_requested", label: "Requested courier pickup", orderFrom: "shipment", snap: "os" },

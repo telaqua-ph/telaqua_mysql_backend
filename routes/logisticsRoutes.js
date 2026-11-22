@@ -19,6 +19,7 @@ import {
   refreshShipwayOrderTracking,
   sendShipwayTrackingWhatsApp,
   createIndiaPostShipment,
+  recordOrderCourier,
   getIndiaPostOrderTracking,
   getIndiaPostStatus,
   refreshIndiaPostOrderTracking,
@@ -45,6 +46,8 @@ router.post("/shipway/orders/:orderId/tracking/refresh", refreshShipwayOrderTrac
 router.post("/shipway/orders/:orderId/tracking/send-whatsapp", sendShipwayTrackingWhatsApp);
 router.get("/indiapost/status", getIndiaPostStatus);
 router.post("/indiapost/orders/:orderId/shipment", createIndiaPostShipment);
+// Courier booked outside the admin (India Post portal / counter, Shipway, Delhivery): save courier + number only.
+router.post("/orders/:orderId/courier-record", recordOrderCourier);
 router.get("/indiapost/orders/:orderId/tracking", getIndiaPostOrderTracking);
 router.post("/indiapost/orders/:orderId/tracking/refresh", refreshIndiaPostOrderTracking);
 router.post("/indiapost/orders/:orderId/tracking/send-whatsapp", sendIndiaPostTrackingWhatsApp);
