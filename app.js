@@ -31,6 +31,8 @@ import inventoryRoutes from "./routes/inventory.js";
 import adminPushRoutes from "./routes/adminPush.js";
 import invoiceLinkRoutes from "./routes/invoiceLink.js";
 import trackLinkRoutes from "./routes/trackLink.js";
+import adminActivityRoutes from "./routes/adminActivity.js";
+import { adminActivityLogger } from "./services/adminActivityLog.js";
 import { handleSwipeWebhook } from "./controllers/swipeWebhookController.js";
 import { handleRazorpayWebhook } from "./controllers/razorpayWebhookController.js";
 
@@ -164,6 +166,9 @@ app.get("/health", (req, res) => {
   });
 });
 
+// Admin Activity Log: records which admin changed what (must run before the routes).
+app.use("/api", adminActivityLogger);
+
 // Same URL paths as the previous Vercel serverless API
 app.use("/api/auth", authRoutes);
 app.use("/api/orders", ordersRoutes);
@@ -184,6 +189,7 @@ app.use("/api/delivery", deliveryRoutes);
 app.use("/api/delhivery", deliveryRoutes);
 app.use("/api/admin/logistics", logisticsRoutes);
 app.use("/api/admin/push", adminPushRoutes);
+app.use("/api/admin/activity-log", adminActivityRoutes);
 
 // Public WhatsApp invoice link (MyOperator template button: /i/{{1}})
 app.use("/i", invoiceLinkRoutes);
