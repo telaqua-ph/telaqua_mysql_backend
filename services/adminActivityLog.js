@@ -39,6 +39,7 @@ const ROUTES = [
   { m: "*", p: /^\/admin\/activity-log(\/|$)/, skip: true },
 
   // ---- orders ----
+  { m: "POST", p: /^\/orders\/leads\/confirm$/, action: "lead_confirmed", label: "Confirmed lead (QR partial payment)", orderFrom: "leadOrResponse", snap: "osi" },
   { m: "POST", p: /^\/orders\/manual-cod$/, action: "cod_order_created", label: "Added COD order", orderFrom: "response", snap: "osi" },
   { m: "PATCH", p: /^\/orders\/cod-payment\/bulk$/, action: "cod_paid_bulk", label: "Marked COD paid (bulk)", orderFrom: "bodyIds", snap: "o" },
   { m: "PATCH", p: /^\/orders\/(\d+)\/cod-payment$/, action: "cod_marked_paid", label: "Marked COD paid", orderFrom: "path", snap: "o" },
@@ -210,6 +211,8 @@ async function resolveOrderIdsBefore(route, req) {
     case "path": return [toId(match?.[1])].filter(Boolean);
     case "path2": return [toId(match?.[2])].filter(Boolean);
     case "body": return [toId(req.body?.order_id ?? req.body?.orderId)].filter(Boolean);
+    case "leadOrResponse":
+      return String(req.body?.lead_type || "").toLowerCase() === "online" ? [toId(req.body?.lead_id)].filter(Boolean) : [];
     case "bodyIds": {
       const ids = Array.isArray(req.body?.order_ids) ? req.body.order_ids : [];
       return [...new Set(ids.map(toId).filter(Boolean))].slice(0, 300);
@@ -378,7 +381,7 @@ async function recordAfterResponse({ req, res, route, before, orderIds, promoId 
   const adminId = toId(req.admin?.id ?? req.user?.admin_id ?? req.user?.id);
   if (!adminId) return; // not an admin token (customer/public request)
 
-  if (route.orderFrom === "response") {
+  if (route.orderFrom === "response" || (route.orderFrom === "leadOrResponse" && !orderIds.length)) {
     const created = orderIdFromResponse(res.locals.activityResponseBody);
     if (created) orderIds = [created];
   }

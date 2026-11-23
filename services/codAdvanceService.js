@@ -200,7 +200,7 @@ async function fetchRazorpayState(razorpayOrderId, razorpayPaymentId) {
   return { rzOrder, rzPayment };
 }
 
-async function insertCodAdvanceOrder(client, { orderData, pricing, financial, attempt, payment }) {
+export async function insertCodAdvanceOrder(client, { orderData, pricing, financial, attempt, payment }) {
   // The partial payment actually captured, deducted from the total.
   const paidNow = round2(Number(attempt.amount_paise) / 100);
   const core = [

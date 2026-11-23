@@ -236,7 +236,7 @@ export function buildSwipePayload(order) {
       payload.reference = `Website Order: ${order.order_number || order.id}; Payment: COD (Partially Paid Rs ${partial}, Balance Due Rs ${balance})`;
       payload.notes = [
         couponNote,
-        `COD Partially Paid: Rs ${partial} paid online${rzRef ? ` (Razorpay ${rzRef})` : ""}. ` +
+        `COD Partially Paid: Rs ${partial} paid online${rzRef ? ` (${/^pay_/i.test(rzRef) ? "Razorpay" : "UPI ref"} ${rzRef})` : ""}. ` +
           (isPaid ? `Balance Rs ${balance} collected in cash.` : `Remaining due Rs ${balance} payable on delivery.`),
       ].filter(Boolean).join("; ");
       payload.payments = [{

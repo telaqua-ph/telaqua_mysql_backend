@@ -27,6 +27,7 @@ import { createInvoiceAccessToken, validateCheckoutLead, validateWebsiteCodOrder
 import { listOnlineLeadOrders } from "../services/leads.js";
 import { listCheckoutLeads, upsertCheckoutLead } from "../services/checkoutLeadService.js";
 import { isValidRazorpaySignature } from "./paymentController.js";
+import { confirmCodLead, confirmOnlineLead } from "../services/leadConfirmation.js";
 
 const MIGRATION_MESSAGE = "COD advance tables are missing. Run node scripts/migrate-cod-advance-fee.js";
 
@@ -194,11 +195,44 @@ export async function listCodAdvanceIssuesHandler(req, res) {
 export async function listUnpaidCodCheckoutsHandler(req, res) {
   try {
     const [checkoutLeads, checkouts, onlineOrders] = await Promise.all([listCheckoutLeads(), listUnpaidCodCheckouts(), listOnlineLeadOrders()]);
-    return res.json({ success: true, checkouts: [...checkoutLeads, ...checkouts], online_orders: onlineOrders });
+    // lead_source tells the admin which table a LEAD-xxxx row came from (ids can overlap).
+    return res.json({
+      success: true,
+      checkouts: [
+        ...checkoutLeads.map((row) => ({ ...row, lead_source: "checkout_lead" })),
+        ...checkouts.map((row) => ({ ...row, lead_source: "cod_advance" })),
+      ],
+      online_orders: onlineOrders,
+    });
   } catch (error) {
     if (isMissingSchema(error)) return res.status(503).json({ success: false, message: MIGRATION_MESSAGE });
     console.error("Unpaid COD checkouts error:", error);
     return res.status(500).json({ success: false, message: "Unable to load unpaid COD checkouts." });
+  }
+}
+
+/**
+ * POST /api/orders/leads/confirm (admin)
+ * The customer paid the COD partial payment (₹199 per unit) by scanning the company QR code.
+ * body: { lead_type: "cod" | "online", lead_source?: "checkout_lead" | "cod_advance", lead_id, reference, method?: "upi" | "bank_transfer" | "other", notify?: boolean }
+ */
+export async function confirmLeadHandler(req, res) {
+  const body = req.body || {};
+  const actorId = Number(req.user?.admin_id || req.user?.id) || null;
+  const options = { reference: body.reference, method: body.method, actorId, notify: body.notify !== false && body.notify !== "false" };
+  try {
+    const result = String(body.lead_type || "").toLowerCase() === "online"
+      ? await confirmOnlineLead(body.lead_id, options)
+      : await confirmCodLead(body.lead_id, { ...options, source: body.lead_source || "cod_advance" });
+    return res.status(201).json({
+      success: true,
+      message: `Order ${result.orderNumber} confirmed. ₹${result.advance} received, ₹${result.due} to collect on delivery.`,
+      data: { id: result.orderId, order_number: result.orderNumber, advance_paid: result.advance, amount_due: result.due, total: result.total },
+    });
+  } catch (error) {
+    const status = error?.httpStatus || 500;
+    if (status >= 500) console.error("Confirm lead error:", error);
+    return res.status(status).json({ success: false, message: error?.publicMessage || "Unable to confirm this lead." });
   }
 }
 

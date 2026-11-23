@@ -75,7 +75,7 @@ export async function generateLocalInvoicePdf(order) {
   const totalLabel = isPaid ? "TOTAL PAID" : partialPaid > 0 ? "REMAINING DUE" : "TOTAL DUE";
   const footerReference = partialPaid > 0
     ? `Cash on delivery - partially paid. ${money(partialPaid)} paid online` +
-      (order.cod_advance_razorpay_payment_id ? ` (Razorpay reference ${order.cod_advance_razorpay_payment_id})` : "") +
+      (order.cod_advance_razorpay_payment_id ? ` (${/^pay_/i.test(String(order.cod_advance_razorpay_payment_id)) ? "Razorpay" : "UPI"} reference ${order.cod_advance_razorpay_payment_id})` : "") +
       (isPaid
         ? `; balance of ${money(balanceDue)} collected in cash.`
         : `; remaining ${money(balanceDue)} payable in cash on delivery.`)
