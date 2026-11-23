@@ -232,7 +232,12 @@ export async function confirmLeadHandler(req, res) {
   } catch (error) {
     const status = error?.httpStatus || 500;
     if (status >= 500) console.error("Confirm lead error:", error);
-    return res.status(status).json({ success: false, message: error?.publicMessage || "Unable to confirm this lead." });
+    // Admin-only endpoint: show the real reason instead of a generic message.
+    const reason = error?.publicMessage || error?.sqlMessage || error?.message || "";
+    return res.status(status).json({
+      success: false,
+      message: error?.publicMessage || `Unable to confirm this lead${reason ? `: ${String(reason).slice(0, 200)}` : "."}`,
+    });
   }
 }
 

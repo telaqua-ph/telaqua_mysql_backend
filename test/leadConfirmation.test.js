@@ -38,6 +38,24 @@ test("only unpaid non-COD orders are online leads", () => {
   assert.equal(isUnpaidOnlineLead({ payment_mode: "cod", payment_status: "Pending" }), false);
 });
 
+test("checkout-lead details are cleaned like a website COD order (no undefined values)", async () => {
+  const { normalizeLeadOrderData } = await import("../services/leadConfirmation.js");
+  const { orderData, missing } = normalizeLeadOrderData({
+    checkout_session_id: "abc", customer_name: "Bale suvarna raju", phone: "9885303323", email: "",
+    address: "Chataparru Road, Near Indian Petrol Bunk", village: "Eluru", city: "Eluru", state: "Andhra Pradesh",
+    pincode: "534001", quantity: 1, promo_code: "TA40",
+  });
+  assert.deepEqual(missing, []);
+  assert.equal(orderData.email, "9885303323@guest.tel-aqua.in");
+  assert.equal(orderData.whatsapp_consent_at, null);
+  assert.equal(orderData.whatsapp_updates_consent, false);
+  assert.equal(orderData.address, "Chataparru Road, Near Indian Petrol Bunk, Eluru");
+  assert.ok(Object.values(orderData).every((v) => v !== undefined));
+
+  const empty = normalizeLeadOrderData({ customer_name: "Kaushal kumar", phone: "7004759928" });
+  assert.deepEqual(empty.missing, ["address", "city", "state", "6-digit pincode"]);
+});
+
 test("activity log records lead confirmation", () => {
   assert.equal(matchActivityRoute("POST", "/orders/leads/confirm").action, "lead_confirmed");
 });

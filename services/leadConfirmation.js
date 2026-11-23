@@ -28,6 +28,7 @@ import { triggerCalibrationVideoWhatsAppAsync } from "./interaktCalibrationVideo
 import { scheduleMetaPurchase } from "./metaPurchase.js";
 import { codPartialAmount } from "../lib/codPartialPayment.js";
 import { insertCodAdvanceOrder } from "./codAdvanceService.js";
+import { resolveOrderEmail } from "../utils/guestEmail.js";
 
 const REFERENCE = /^[A-Za-z0-9@._\-/]{4,64}$/;
 export const MANUAL_PAYMENT_METHODS = ["upi", "bank_transfer", "other"];
@@ -106,6 +107,47 @@ function afterOrderConfirmed({ orderId, orderNumber, customerName, phone, total,
 
 export const LEAD_SOURCES = ["cod_advance", "checkout_lead"];
 
+const clean = (value) => (value === undefined || value === null ? "" : String(value).trim());
+
+/**
+ * Turn saved checkout details into the same shape a website COD order uses.
+ * Checkout leads only store what the visitor typed, so fields such as the WhatsApp
+ * consent time can be missing; the database driver rejects missing (undefined) values.
+ * Returns { orderData, missing } — missing lists the details staff still need.
+ */
+export function normalizeLeadOrderData(raw = {}) {
+  const phone = clean(raw.phone).replace(/\D/g, "").slice(-10);
+  const pincode = clean(raw.pincode).replace(/\D/g, "");
+  const parts = [clean(raw.address), clean(raw.house_landmark), clean(raw.village), clean(raw.mandal_area)].filter(Boolean);
+  const address = parts.filter((part, index) => !parts.slice(0, index).some((prev) => prev.toLowerCase().includes(part.toLowerCase()))).join(", ");
+  const consent = raw.whatsapp_updates_consent === true || raw.whatsapp_updates_consent === 1 || raw.whatsapp_updates_consent === "1" || raw.whatsapp_updates_consent === "true";
+  const orderData = {
+    ...raw,
+    customer_name: clean(raw.customer_name),
+    phone,
+    email: resolveOrderEmail(clean(raw.email), phone),
+    address,
+    city: clean(raw.city),
+    state: clean(raw.state),
+    pincode,
+    quantity: Math.max(1, Math.floor(Number(raw.quantity) || 1)),
+    promo_code: clean(raw.promo_code) || null,
+    whatsapp_updates_consent: consent,
+    whatsapp_consent_at: consent && raw.whatsapp_consent_at ? raw.whatsapp_consent_at : null,
+  };
+  for (const key of Object.keys(orderData)) {
+    if (orderData[key] === undefined) orderData[key] = null;
+  }
+  const missing = [];
+  if (!orderData.customer_name) missing.push("name");
+  if (!/^\d{10}$/.test(orderData.phone)) missing.push("10-digit phone");
+  if (!orderData.address) missing.push("address");
+  if (!orderData.city) missing.push("city");
+  if (!orderData.state) missing.push("state");
+  if (!/^\d{6}$/.test(orderData.pincode)) missing.push("6-digit pincode");
+  return { orderData, missing };
+}
+
 /** Load and lock the checkout row for a COD lead. Returns the customer's checkout details. */
 async function lockCheckoutLead(client, source, id) {
   if (source === "checkout_lead") {
@@ -159,10 +201,10 @@ export async function confirmCodLead(attemptId, { source = "cod_advance", refere
   try {
     await client.query("BEGIN");
     const lead = await lockCheckoutLead(client, source, id);
-    const current = lead.row;
-    orderData = lead.orderData;
-    if (!orderData.customer_name || !orderData.phone || !orderData.address || !orderData.pincode) {
-      throw leadError("This lead is missing the customer's name, phone, address or pincode. Use Add COD Order instead.", 422);
+    const normalized = normalizeLeadOrderData(lead.orderData);
+    orderData = normalized.orderData;
+    if (normalized.missing.length) {
+      throw leadError(`This lead is missing the customer's ${normalized.missing.join(", ")}. Use + Add COD Order with the full details instead.`, 422);
     }
 
     const pricing = await resolveOrderPricing(orderData);
