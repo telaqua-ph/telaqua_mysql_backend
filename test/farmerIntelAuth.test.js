@@ -46,3 +46,25 @@ test("a Farmer Intel token issued to another admin session is rejected", async (
   await requireFarmerIntelLogin()({ headers: { "x-farmer-intel-token": token }, user: { admin_id: 2 } }, res, () => {});
   assert.equal(res.statusCode, 403);
 });
+
+test("map opens for any logged-in admin when the separate login is off (default)", async () => {
+  const { farmerIntelAccess } = await import("../middleware/adminPermissions.js");
+  delete process.env.FARMER_INTEL_LOGIN_REQUIRED;
+  const req = { headers: {}, user: { admin_id: 3 } };
+  let called = false;
+  await farmerIntelAccess()(req, fakeRes(), () => { called = true; });
+  assert.equal(called, true);
+  assert.deepEqual(req.farmerIntelPermissions, { canViewCustomerData: true, canManageCouriers: true });
+});
+
+test("FARMER_INTEL_LOGIN_REQUIRED=true brings the lock back", async () => {
+  const { farmerIntelAccess } = await import("../middleware/adminPermissions.js");
+  process.env.FARMER_INTEL_LOGIN_REQUIRED = "true";
+  const res = fakeRes();
+  let called = false;
+  await farmerIntelAccess()({ headers: {}, user: { admin_id: 3 } }, res, () => { called = true; });
+  delete process.env.FARMER_INTEL_LOGIN_REQUIRED;
+  assert.equal(called, false);
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.code, "FARMER_INTEL_LOGIN_REQUIRED");
+});

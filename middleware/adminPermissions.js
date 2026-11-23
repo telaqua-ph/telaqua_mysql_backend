@@ -78,3 +78,22 @@ export function requireFarmerIntelLogin() {
     }
   };
 }
+
+/** True only when the separate Farmer Intel email/password lock is switched on (FARMER_INTEL_LOGIN_REQUIRED=true). */
+export function farmerIntelLoginRequired(env = process.env) {
+  return String(env.FARMER_INTEL_LOGIN_REQUIRED || "").trim().toLowerCase() === "true";
+}
+
+/**
+ * Farmer Intel Map access.
+ * Default: any logged-in, active admin can open the map (no second login), with full access.
+ * Set FARMER_INTEL_LOGIN_REQUIRED=true to bring back the separate Farmer Intel login.
+ */
+export function farmerIntelAccess() {
+  const loginGate = requireFarmerIntelLogin();
+  return (req, res, next) => {
+    if (farmerIntelLoginRequired()) return loginGate(req, res, next);
+    req.farmerIntelPermissions = { canViewCustomerData: true, canManageCouriers: true };
+    return next();
+  };
+}
