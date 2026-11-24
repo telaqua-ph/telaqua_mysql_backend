@@ -2096,7 +2096,7 @@ export async function updateShipmentStatus(req, res) {
       let shipment = null;
       try {
         const { rows } = await client.query(
-          `SELECT id, fulfillment_status, shipment_status FROM shipments
+          `SELECT id, fulfillment_status, shipment_status, provider, courier_name FROM shipments
            WHERE order_id = ? AND sequence_no = 1`,
           [id]
         );
