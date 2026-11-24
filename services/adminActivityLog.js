@@ -40,6 +40,7 @@ const ROUTES = [
 
   // ---- orders ----
   { m: "POST", p: /^\/orders\/leads\/confirm$/, action: "lead_confirmed", label: "Confirmed lead (QR partial payment)", orderFrom: "leadOrResponse", snap: "osi" },
+  { m: "POST", p: /^\/orders\/manual-prepaid$/, action: "prepaid_order_added", label: "Added prepaid order (manual payment)", orderFrom: "response", snap: "osi" },
   { m: "POST", p: /^\/orders\/manual-cod$/, action: "cod_order_created", label: "Added COD order", orderFrom: "response", snap: "osi" },
   { m: "PATCH", p: /^\/orders\/cod-payment\/bulk$/, action: "cod_paid_bulk", label: "Marked COD paid (bulk)", orderFrom: "bodyIds", snap: "o" },
   { m: "PATCH", p: /^\/orders\/(\d+)\/cod-payment$/, action: "cod_marked_paid", label: "Marked COD paid", orderFrom: "path", snap: "o" },

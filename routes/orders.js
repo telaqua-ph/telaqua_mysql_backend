@@ -8,6 +8,7 @@ import {
   exportOrders,
   createOrder,
   createManualCodOrder,
+  createManualPrepaidOrder,
   createWebsiteCodOrder,
   collectCodPayment,
   collectBulkCodPayments,
@@ -62,6 +63,8 @@ router.delete("/cod-advance/unpaid/:id", requireAuth, deleteUnpaidCodCheckoutHan
 router.post("/cod-advance/:razorpayOrderId/retry", requireAuth, retryCodAdvanceOrder);
 router.post("/cod-advance/:id/refund", requireAuth, refundCodAdvance);
 router.post("/manual-cod", requireAuth, createManualCodOrder);
+// + Add Order → Prepaid (already paid by UPI / QR / bank / Razorpay link), with transaction ID.
+router.post("/manual-prepaid", requireAuth, requireActiveAdmin, createManualPrepaidOrder);
 // Leads → Confirm: customer paid the partial payment by QR; staff enter the UPI transaction ID.
 router.post("/leads/confirm", requireAuth, requireActiveAdmin, confirmLeadHandler);
 router.patch("/cod-payment/bulk", requireAuth, collectBulkCodPayments);

@@ -67,12 +67,26 @@ const COD_ADVANCE_SELECT = ", cod_advance_fee, cod_advance_status, cod_advance_r
 export async function loadOrderForFulfillment(orderId) {
   try {
     const { rows } = await query(ORDER_SELECT.replace("/*COD_ADVANCE*/", COD_ADVANCE_SELECT), [orderId]);
-    return rows[0] || null;
+    return withManualPayment(rows[0] || null);
   } catch (error) {
     // Databases without the COD advance migration still load the order.
     if (error?.code !== "ER_BAD_FIELD_ERROR" || !/cod_a/i.test(String(error?.message))) throw error;
     const { rows } = await query(ORDER_SELECT, [orderId]);
     return rows[0] || null;
+  }
+}
+
+/** Manual prepaid orders (Add Order → Prepaid): add the UTR / transaction ID if the columns exist. */
+async function withManualPayment(order) {
+  if (!order) return order;
+  try {
+    const { rows } = await query(
+      "SELECT manual_payment_reference, manual_payment_method FROM orders WHERE id = ? LIMIT 1",
+      [order.id]
+    );
+    return { ...order, ...(rows[0] || {}) };
+  } catch {
+    return order; // columns not added yet = no manual prepaid orders
   }
 }
 
@@ -165,6 +179,7 @@ function mapPaymentMethod(value) {
   return {
     upi: "upi", card: "card", netbanking: "netBanking", emi: "emi",
     cash: "cash", cheque: "cheque", wallet: "upi", paylater: "emi",
+    bank_transfer: "netBanking", razorpay_link: "upi", other: "upi",
     razorpay: "upi",
     cod: "cash",
     "cash on delivery": "cash",
@@ -263,9 +278,11 @@ export function buildSwipePayload(order) {
   payload.payments = [{
     amount: money.finalTotal,
     method: mapPaymentMethod(order.payment_method),
-    notes: String(order.razorpay_payment_id || ""),
+    notes: String(order.razorpay_payment_id || order.manual_payment_reference || ""),
   }];
-  payload.reference = `Website Order: ${order.order_number || order.id}; Razorpay Payment: ${order.razorpay_payment_id}`;
+  payload.reference = order.razorpay_payment_id
+    ? `Website Order: ${order.order_number || order.id}; Razorpay Payment: ${order.razorpay_payment_id}`
+    : `Order: ${order.order_number || order.id}; Paid by ${String(order.manual_payment_method || order.payment_method || "UPI").replace(/_/g, " ")}, Ref: ${order.manual_payment_reference || "-"}`;
   return payload;
 }
 

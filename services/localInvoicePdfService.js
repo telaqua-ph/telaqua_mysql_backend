@@ -87,7 +87,9 @@ export async function generateLocalInvoicePdf(order) {
         ? ` Delivery charge of ${money(deliveryCharge)} paid online in advance (non-refundable)` +
           (order.cod_advance_razorpay_payment_id ? `, Razorpay reference ${order.cod_advance_razorpay_payment_id}.` : ".")
         : "")
-    : `Razorpay payment reference: ${order.razorpay_payment_id || "-"}`;
+    : order.razorpay_payment_id
+      ? `Razorpay payment reference: ${order.razorpay_payment_id}`
+      : `Paid in advance. Payment reference: ${order.manual_payment_reference || "-"}`;
   const footerNote = isPaid
     ? "This fallback copy was generated from the paid order snapshot."
     : partialPaid > 0

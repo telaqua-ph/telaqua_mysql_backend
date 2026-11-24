@@ -14,6 +14,14 @@ import {
 } from "../services/whatsappConsent.js";
 import { logPaymentEvent, reconcileRazorpayOrder, triggerOrderFulfillmentAsync } from "../services/confirmRazorpayPayment.js";
 import { triggerOrderPlacedWhatsAppAsync } from "../services/interaktOrderPlacedService.js";
+import {
+  assertPrepaidReferenceUnused,
+  deductStockOrRollback,
+  ensureManualPrepaidColumns,
+  paymentDateValue,
+  validatePrepaidPayment,
+  verifyRazorpayPayment,
+} from "../services/manualPrepaidOrder.js";
 import { triggerCalibrationVideoWhatsAppAsync } from "../services/interaktCalibrationVideoService.js";
 import { scheduleMetaPurchase } from "../services/metaPurchase.js";
 import {
@@ -2474,5 +2482,138 @@ export async function listDeletedOrdersHandler(req, res) {
   } catch (error) {
     console.error("Deleted orders API error:", error?.message || error);
     return res.status(500).json({ success: false, message: "Failed to load deleted orders" });
+  }
+}
+
+/**
+ * POST /api/orders/manual-prepaid (admin)
+ * "+ Add Order" → Prepaid (already paid): the customer paid the full amount by UPI / QR,
+ * bank transfer or a Razorpay payment link; staff enter the transaction ID / UTR.
+ * Creates a Confirmed, Paid, prepaid order (nothing to collect on delivery).
+ */
+export async function createManualPrepaidOrder(req, res) {
+  const adminId = currentAdminId(req);
+  if (!adminId) return res.status(401).json({ success: false, message: "Unauthorized" });
+
+  try {
+    // Same customer / address / quantity / price rules as Add COD Order.
+    const validation = validateManualCodOrder({ ...(req.body || {}), offline_sold: "" });
+    if (validation.error) return res.status(400).json({ success: false, message: validation.error });
+    const orderData = validation.data;
+
+    let pricing = null;
+    let financial = null;
+    if (orderData.promo_code) {
+      pricing = await resolveOrderPricing(orderData);
+      if (pricing.error) return res.status(400).json({ success: false, message: pricing.error });
+      financial = buildFinancialSnapshot(pricing);
+    }
+    const orderTotal = financial ? financial.finalTotal : orderData.total_amount;
+
+    const payment = validatePrepaidPayment(req.body || {}, { orderTotal });
+    await ensureManualPrepaidColumns();
+    await assertPrepaidReferenceUnused(payment.reference);
+
+    let razorpayMethod = null;
+    if (payment.isRazorpayId) razorpayMethod = await verifyRazorpayPayment(payment.reference, orderTotal);
+
+    const stockCheck = await assertStockAvailable(orderData.quantity);
+    if (!stockCheck.ok) {
+      return res.status(409).json({ success: false, message: stockCheck.message, available: stockCheck.available });
+    }
+
+    const paymentMethod = razorpayMethod || payment.method;
+    const paidAt = paymentDateValue(payment.paidOn);
+    const common = [
+      orderData.customer_name, orderData.phone, orderData.email, orderData.address,
+      orderData.city, orderData.state, orderData.pincode, orderData.quantity,
+    ];
+    const manual = [
+      payment.isRazorpayId ? payment.reference : null,
+      payment.reference, payment.method, payment.isRazorpayId ? "razorpay" : "staff", adminId,
+    ];
+
+    let inserted;
+    if (pricing) {
+      inserted = await query(
+        `INSERT INTO orders (
+          customer_name, phone, email, address, city, state, pincode, quantity,
+          unit_price, total_amount, payment_method, payment_status, order_status, payment_mode,
+          promo_code, original_amount, discount_amount, subtotal, taxable_amount, gst_amount,
+          gst_rate, shipping_amount, final_total, invoice_status, whatsapp_updates_consent,
+          whatsapp_consent_at, order_channel, payment_date,
+          razorpay_payment_id, manual_payment_reference, manual_payment_method,
+          manual_payment_verified_by, manual_payment_recorded_by
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, 'Paid', 'Confirmed', 'razorpay',
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, 'not_created', 0,
+          NULL, 'admin', COALESCE(?, CURRENT_TIMESTAMP),
+          ?, ?, ?, ?, ?
+        )`,
+        [
+          ...common,
+          pricing.unit_price, financial.finalTotal, paymentMethod,
+          pricing.promo_code, pricing.original_amount, pricing.discount_amount, financial.subtotal,
+          financial.taxableAmount, financial.gstAmount, financial.gstRate, financial.shippingAmount,
+          financial.finalTotal, paidAt, ...manual,
+        ]
+      );
+    } else {
+      inserted = await query(
+        `INSERT INTO orders (
+          customer_name, phone, email, address, city, state, pincode, quantity,
+          unit_price, total_amount, final_total, payment_method, payment_status, order_status, payment_mode,
+          whatsapp_updates_consent, whatsapp_consent_at, order_channel, payment_date,
+          razorpay_payment_id, manual_payment_reference, manual_payment_method,
+          manual_payment_verified_by, manual_payment_recorded_by
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, 'Paid', 'Confirmed', 'razorpay',
+          0, NULL, 'admin', COALESCE(?, CURRENT_TIMESTAMP),
+          ?, ?, ?, ?, ?
+        )`,
+        [
+          ...common,
+          orderData.unit_price, orderData.total_amount, orderData.total_amount, paymentMethod,
+          paidAt, ...manual,
+        ]
+      );
+    }
+
+    const id = inserted.insertId;
+    const orderNumber = `TAQ-${String(id).padStart(6, "0")}`;
+    await query("UPDATE orders SET order_number = ? WHERE id = ?", [orderNumber, id]);
+    await deductStockOrRollback(id, orderNumber, orderData.quantity);
+
+    const { rows } = await query("SELECT * FROM orders WHERE id = ?", [id]);
+    logPaymentEvent("MANUAL_PREPAID_ORDER_CREATED", {
+      orderId: id, orderNumber, method: payment.method, verifiedBy: payment.isRazorpayId ? "razorpay" : "staff", adminId,
+    });
+
+    triggerOrderFulfillmentAsync(id);
+    if (req.body?.notify !== false && req.body?.notify !== "false") {
+      triggerOrderPlacedWhatsAppAsync({
+        orderDbId: id, customerName: orderData.customer_name, customerPhone: orderData.phone,
+        orderId: orderNumber, orderAmount: orderTotal,
+      });
+      triggerCalibrationVideoWhatsAppAsync({
+        orderDbId: id, customerName: orderData.customer_name, customerPhone: orderData.phone, orderId: orderNumber,
+      });
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: `Prepaid order ${orderNumber} created as Paid (${payment.methodLabel}, ref ${payment.reference}).`,
+      order: withDisplayStatuses(rows[0]),
+    });
+  } catch (error) {
+    const status = error?.httpStatus || (error?.code === "ER_DUP_ENTRY" ? 409 : 500);
+    if (status >= 500) console.error("Manual prepaid order error:", error);
+    const message = error?.publicMessage
+      || (error?.code === "ER_DUP_ENTRY" ? "This transaction ID is already recorded on another order." : null)
+      || `Unable to create the prepaid order${error?.sqlMessage || error?.message ? `: ${String(error.sqlMessage || error.message).slice(0, 200)}` : "."}`;
+    return res.status(status).json({ success: false, message });
   }
 }
