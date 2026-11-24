@@ -29,9 +29,20 @@ import { scheduleMetaPurchase } from "./metaPurchase.js";
 import { codPartialAmount } from "../lib/codPartialPayment.js";
 import { insertCodAdvanceOrder } from "./codAdvanceService.js";
 import { resolveOrderEmail } from "../utils/guestEmail.js";
+import { istDate, paymentDateValue } from "./manualPrepaidOrder.js";
 
 const REFERENCE = /^[A-Za-z0-9@._\-/]{4,64}$/;
 export const MANUAL_PAYMENT_METHODS = ["upi", "bank_transfer", "other"];
+
+export function normalizeAdvancePaidOn(value, today = istDate()) {
+  const paidOn = String(value ?? "").trim() || today;
+  const parsed = new Date(`${paidOn}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(paidOn) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== paidOn) {
+    throw leadError("Payment received date must be a valid date.", 422);
+  }
+  if (paidOn > today) throw leadError("Payment received date cannot be in the future.", 422);
+  return { paidOn, verifiedAt: paymentDateValue(paidOn, today) };
+}
 
 function round2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
@@ -186,12 +197,13 @@ async function lockCheckoutLead(client, source, id) {
 /**
  * COD lead (checkout_leads or cod_advance_payments row, no order yet) → new COD order with the manual partial payment.
  */
-export async function confirmCodLead(attemptId, { source = "cod_advance", reference, method, actorId = null, notify = true } = {}, { db = pool, after = afterOrderConfirmed } = {}) {
+export async function confirmCodLead(attemptId, { source = "cod_advance", reference, method, paidOn, actorId = null, notify = true } = {}, { db = pool, after = afterOrderConfirmed } = {}) {
   const id = Number(attemptId);
   if (!Number.isInteger(id) || id <= 0) throw leadError("Invalid lead.", 400);
   if (!LEAD_SOURCES.includes(source)) throw leadError("Unknown lead type. Refresh the Leads page.", 400);
   const ref = normalizePaymentReference(reference);
   const payMethod = normalizeManualMethod(method);
+  const { verifiedAt } = normalizeAdvancePaidOn(paidOn);
   await assertReferenceUnused(db, ref);
 
   const client = await db.connect();
@@ -227,6 +239,7 @@ export async function confirmCodLead(attemptId, { source = "cod_advance", refere
         amount_paise: Math.round(split.advance * 100),
         razorpay_order_id: null,
         declaration_accepted_at: lead.declarationAt || new Date(),
+        verified_at: verifiedAt,
       },
       payment: { id: ref },
     });
@@ -284,11 +297,12 @@ export async function confirmCodLead(attemptId, { source = "cod_advance", refere
  * Online lead (Razorpay order still Pending/Failed) → the same order switched to COD
  * with the manual partial payment recorded.
  */
-export async function confirmOnlineLead(orderId, { reference, method, actorId = null, notify = true } = {}, { db = pool, after = afterOrderConfirmed } = {}) {
+export async function confirmOnlineLead(orderId, { reference, method, paidOn, actorId = null, notify = true } = {}, { db = pool, after = afterOrderConfirmed } = {}) {
   const id = Number(orderId);
   if (!Number.isInteger(id) || id <= 0) throw leadError("Invalid order.", 400);
   const ref = normalizePaymentReference(reference);
   const payMethod = normalizeManualMethod(method);
+  const { verifiedAt } = normalizeAdvancePaidOn(paidOn);
   await assertReferenceUnused(db, ref);
 
   const client = await db.connect();
@@ -308,11 +322,11 @@ export async function confirmOnlineLead(orderId, { reference, method, actorId = 
       `UPDATE orders
          SET payment_mode = 'cod', payment_method = 'cod', payment_status = 'Pending', order_status = 'Confirmed',
              cod_advance_fee = ?, cod_advance_status = 'paid', cod_advance_razorpay_order_id = NULL,
-             cod_advance_razorpay_payment_id = ?, cod_advance_verified_at = NOW(), cod_amount_due = ?,
+             cod_advance_razorpay_payment_id = ?, cod_advance_verified_at = COALESCE(?, NOW()), cod_amount_due = ?,
              cod_fee_declaration_accepted_at = COALESCE(cod_fee_declaration_accepted_at, NOW()),
              updated_at = CURRENT_TIMESTAMP
        WHERE id = ?`,
-      [split.advance, ref, split.due, id]
+      [split.advance, ref, verifiedAt, split.due, id]
     );
     const stockResult = await deductStockForSale(client, {
       orderId: id, orderNumber: order.order_number, quantity: order.quantity,

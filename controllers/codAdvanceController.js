@@ -214,12 +214,12 @@ export async function listUnpaidCodCheckoutsHandler(req, res) {
 /**
  * POST /api/orders/leads/confirm (admin)
  * The customer paid the COD partial payment (₹199 per unit) by scanning the company QR code.
- * body: { lead_type: "cod" | "online", lead_source?: "checkout_lead" | "cod_advance", lead_id, reference, method?: "upi" | "bank_transfer" | "other", notify?: boolean }
+ * body: { lead_type: "cod" | "online", lead_source?: "checkout_lead" | "cod_advance", lead_id, reference, method?: "upi" | "bank_transfer" | "other", paid_on?: "YYYY-MM-DD", notify?: boolean }
  */
 export async function confirmLeadHandler(req, res) {
   const body = req.body || {};
   const actorId = Number(req.user?.admin_id || req.user?.id) || null;
-  const options = { reference: body.reference, method: body.method, actorId, notify: body.notify !== false && body.notify !== "false" };
+  const options = { reference: body.reference, method: body.method, paidOn: body.paid_on, actorId, notify: body.notify !== false && body.notify !== "false" };
   try {
     const result = String(body.lead_type || "").toLowerCase() === "online"
       ? await confirmOnlineLead(body.lead_id, options)

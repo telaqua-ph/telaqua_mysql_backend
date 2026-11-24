@@ -228,6 +228,7 @@ export async function insertCodAdvanceOrder(client, { orderData, pricing, financ
     paidNow,
     attempt.razorpay_order_id,
     payment.id,
+    attempt.verified_at || null,
     round2(financial.finalTotal - paidNow),
     attempt.declaration_accepted_at,
   ];
@@ -239,7 +240,7 @@ export async function insertCodAdvanceOrder(client, { orderData, pricing, financ
     cod_advance_razorpay_payment_id, cod_advance_verified_at, cod_amount_due,
     cod_fee_declaration_accepted_at`;
   const values = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'cod', 'Pending', 'Confirmed', 'cod',
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_created', ?, ?, ?, 'paid', ?, ?, NOW(), ?, ?`;
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_created', ?, ?, ?, 'paid', ?, ?, COALESCE(?, NOW()), ?, ?`;
 
   try {
     return await client.query(

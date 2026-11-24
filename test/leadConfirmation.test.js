@@ -5,6 +5,7 @@ const {
   normalizePaymentReference,
   normalizeManualMethod,
   manualAdvanceSplit,
+  normalizeAdvancePaidOn,
   isUnpaidOnlineLead,
   confirmOnlineLead,
   confirmCodLead,
@@ -23,6 +24,13 @@ test("payment method defaults to UPI", () => {
   assert.equal(normalizeManualMethod("BANK_TRANSFER"), "bank_transfer");
   assert.equal(normalizeManualMethod("cash"), "upi");
   assert.equal(normalizeManualMethod(undefined), "upi");
+});
+
+test("lead confirmation accepts a past payment-received date and rejects future dates", () => {
+  assert.deepEqual(normalizeAdvancePaidOn("2026-11-23", "2026-11-24"), {
+    paidOn: "2026-11-23", verifiedAt: "2026-11-23 06:30:00",
+  });
+  assert.throws(() => normalizeAdvancePaidOn("2026-11-25", "2026-11-24"), /cannot be in the future/);
 });
 
 test("₹199 per unit is deducted from the total, max 3 units", () => {
@@ -84,7 +92,7 @@ test("online lead becomes a COD order with ₹199 paid and ₹1600 due, stock de
   const result = await confirmOnlineLead(1551, { reference: "632082106728", actorId: 3 }, { db, after: (a) => { afterArgs = a; } });
   assert.deepEqual([result.advance, result.due, result.orderNumber], [199, 1600, "TAQ-001551"]);
   const update = db.calls.find((c) => c.sql.startsWith("UPDATE orders SET payment_mode = 'cod'"));
-  assert.deepEqual(update.params, [199, "632082106728", 1600, 1551]);
+  assert.deepEqual(update.params, [199, "632082106728", null, 1600, 1551]);
   assert.ok(db.calls.some((c) => c.sql.startsWith("UPDATE inventory SET current_stock") && c.params[0] === 49));
   assert.ok(db.calls.some((c) => c.sql.startsWith("INSERT INTO cod_payment_audit_log") && c.params[1] === 3));
   assert.equal(afterArgs.orderNumber, "TAQ-001551");
