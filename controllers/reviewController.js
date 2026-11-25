@@ -19,10 +19,21 @@ export async function getPublicPhMeterReviews(req, res) {
   const [summary, reviews] = await Promise.all([
     query(`SELECT COUNT(*) AS review_count, COALESCE(ROUND(AVG(rating), 1), 0) AS average_rating
       FROM product_reviews WHERE product_key = ? AND status = 'published'`, [PRODUCT_KEY]),
-    query(`SELECT rating, title, body, customer_name, created_at FROM product_reviews
+    query(`SELECT id, rating, title, body, customer_name, created_at, (photo_data IS NOT NULL) AS has_photo FROM product_reviews
       WHERE product_key = ? AND status = 'published' ORDER BY ${order} LIMIT 100`, [PRODUCT_KEY]),
   ]);
   return res.json({ success: true, average_rating: Number(summary.rows[0]?.average_rating || 0), review_count: Number(summary.rows[0]?.review_count || 0), reviews: reviews.rows.map((row) => ({ ...row, customer_name: customerName(row.customer_name).split(" ")[0] })) });
+}
+
+export async function getPublicReviewPhoto(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) return res.sendStatus(404);
+  const { rows } = await query("SELECT photo_data, photo_type FROM product_reviews WHERE id = ? AND product_key = ? AND status = 'published' AND photo_data IS NOT NULL LIMIT 1", [id, PRODUCT_KEY]);
+  const photo = rows[0];
+  if (!photo || !['image/jpeg', 'image/png', 'image/webp'].includes(photo.photo_type)) return res.sendStatus(404);
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.set('Cache-Control', 'public, max-age=300');
+  res.type(photo.photo_type).send(photo.photo_data);
 }
 
 export async function getEligibleReviewOrders(req, res) {
