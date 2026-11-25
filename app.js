@@ -118,6 +118,7 @@ app.use(
   express.raw({ type: "*/*", limit: "256kb" }),
   delhiveryWebhookRoutes
 );
+app.use("/api/reviews", express.json({ limit: "3mb" }));
 app.use(express.json({ limit: "1mb" }));
 
 // Public invoice PDFs (Interakt document header must fetch via HTTPS)

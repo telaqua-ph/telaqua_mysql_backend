@@ -1,0 +1,1 @@
+ALTER TABLE product_reviews ADD COLUMN photo_data MEDIUMBLOB NULL, ADD COLUMN photo_type VARCHAR(20) NULL;

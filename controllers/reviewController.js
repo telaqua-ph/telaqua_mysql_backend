@@ -41,6 +41,15 @@ export async function createReview(req, res) {
   const rating = Number(req.body?.rating);
   const title = clean(req.body?.title, 140);
   const body = clean(req.body?.body, 2000);
+  let photo = null;
+  if (req.body?.photo) {
+    const match = String(req.body.photo).match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/);
+    if (!match || match[2].length > 2796204) return res.status(400).json({ success: false, message: "Please choose a JPEG, PNG or WebP photo under 2 MB." });
+    const bytes = Buffer.from(match[2], "base64");
+    const valid = match[1] === "jpeg" ? bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff])) : match[1] === "png" ? bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) : bytes.subarray(0, 4).toString() === "RIFF" && bytes.subarray(8, 12).toString() === "WEBP";
+    if (!valid || bytes.length > 2 * 1024 * 1024) return res.status(400).json({ success: false, message: "Please choose a valid JPEG, PNG or WebP photo under 2 MB." });
+    photo = { bytes, type: `image/${match[1]}` };
+  }
   if (!Number.isInteger(orderId) || orderId < 1 || !Number.isInteger(rating) || rating < 1 || rating > 5 || title.length < 3 || body.length < 10) {
     return res.status(400).json({ success: false, message: "Enter a rating, a short title, and at least 10 characters of feedback." });
   }
@@ -48,8 +57,13 @@ export async function createReview(req, res) {
     WHERE o.id = ? AND ${PHONE_MATCH_SQL} AND ${DELIVERED_SQL} LIMIT 1`, [orderId, req.customer.phone]);
   if (!owned.rows[0]) return res.status(403).json({ success: false, message: "Only your delivered Tel-Aqua pH Meter orders can be reviewed." });
   try {
-    await query(`INSERT INTO product_reviews (product_key, order_id, customer_phone, customer_name, rating, title, body, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'published')`, [PRODUCT_KEY, orderId, req.customer.phone, customerName(owned.rows[0].customer_name), rating, title, body]);
+    if (photo) {
+      await query(`INSERT INTO product_reviews (product_key, order_id, customer_phone, customer_name, rating, title, body, status, photo_data, photo_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)`, [PRODUCT_KEY, orderId, req.customer.phone, customerName(owned.rows[0].customer_name), rating, title, body, photo.bytes, photo.type]);
+    } else {
+      await query(`INSERT INTO product_reviews (product_key, order_id, customer_phone, customer_name, rating, title, body, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'published')`, [PRODUCT_KEY, orderId, req.customer.phone, customerName(owned.rows[0].customer_name), rating, title, body]);
+    }
   } catch (error) {
     if (error?.code === "ER_DUP_ENTRY") return res.status(409).json({ success: false, message: "You have already submitted a review for this order." });
     throw error;
