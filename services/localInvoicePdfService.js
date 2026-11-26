@@ -82,7 +82,7 @@ export async function generateLocalInvoicePdf(order) {
     : cod
     ? (isPaid
       ? "COD payment collected."
-      : "Cash on delivery. Payment is pending until collected.") +
+      : `Cash on delivery. ${money(finalTotal)} payable on delivery.`) +
       (deliveryCharge > 0
         ? ` Delivery charge of ${money(deliveryCharge)} paid online in advance (non-refundable)` +
           (order.cod_advance_razorpay_payment_id ? `, Razorpay reference ${order.cod_advance_razorpay_payment_id}.` : ".")
