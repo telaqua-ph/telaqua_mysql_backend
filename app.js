@@ -58,8 +58,12 @@ function buildCorsOrigin() {
       // Local development only
       "http://localhost:5173",
       "http://localhost:3000",
+      "http://localhost:5500",
+      "http://localhost:5501",
       "http://127.0.0.1:5173",
       "http://127.0.0.1:3000",
+      "http://127.0.0.1:5500",
+      "http://127.0.0.1:5501",
     ].filter(Boolean)
   );
 
@@ -118,7 +122,7 @@ app.use(
   express.raw({ type: "*/*", limit: "256kb" }),
   delhiveryWebhookRoutes
 );
-app.use("/api/reviews", express.json({ limit: "3mb" }));
+app.use("/api/reviews", express.json({ limit: "6mb" }));
 app.use(express.json({ limit: "1mb" }));
 
 // Public invoice PDFs (Interakt document header must fetch via HTTPS)

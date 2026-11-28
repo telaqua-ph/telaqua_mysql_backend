@@ -6,6 +6,7 @@ const router = Router();
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 router.get("/ph-meter", asyncRoute(getPublicPhMeterReviews));
 router.get("/:id/photo", asyncRoute(getPublicReviewPhoto));
+router.get("/:id/photo/:number(2)", asyncRoute(getPublicReviewPhoto));
 router.get("/eligible-orders", requireCustomerAuth, asyncRoute(getEligibleReviewOrders));
 router.post("/", requireCustomerAuth, asyncRoute(createReview));
 export default router;
